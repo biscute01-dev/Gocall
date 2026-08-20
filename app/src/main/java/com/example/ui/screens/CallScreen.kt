@@ -41,16 +41,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PhoneInTalk
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -61,7 +67,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -92,6 +97,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -122,6 +128,8 @@ import com.example.ui.webrtc.RemoteVideoView
 import com.example.viewmodel.CallState
 import com.example.viewmodel.CallViewModel
 import com.example.webrtc.WebRtcLiveStats
+import com.example.webrtc.record.RecordingStatus
+import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -145,6 +153,7 @@ fun CallScreen(
     val stats by viewModel.stats.collectAsState()
     val liveStats by viewModel.liveStats.collectAsState()
     val showLiveHud by viewModel.showLiveHud.collectAsState()
+    val recordingStatus by viewModel.recordingStatus.collectAsState()
 
     var showStatsDialog by remember { mutableStateOf(false) }
 
@@ -153,6 +162,7 @@ fun CallScreen(
     var pipOffsetY by remember { mutableStateOf(0f) }
 
     val rtcClient = viewModel.webRtcClient
+    val isCurrentlyRecording = recordingStatus is RecordingStatus.Recording
 
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -288,7 +298,7 @@ fun CallScreen(
                 }
             }
 
-            // 3. Floating Top Bar with Room ID, Duration, and Stats Action
+            // 3. Floating Top Bar with Room ID, Duration, Remote Recording Pill, and Stats Action
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -355,11 +365,20 @@ fun CallScreen(
                     }
                 }
 
-                // Stats Action Buttons (HUD Toggle + Diagnostics modal)
+                // Top Right Action Buttons (Active Recording Indicator + HUD Toggle + Diagnostics modal)
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Active Recording Top Pill
+                    if (isCurrentlyRecording) {
+                        val recState = recordingStatus as RecordingStatus.Recording
+                        ActiveRecordingBadge(
+                            durationSeconds = recState.durationSeconds,
+                            onStopClick = { viewModel.stopRemoteRecording() }
+                        )
+                    }
+
                     // Floating Live Stats HUD Toggle
                     IconButton(
                         onClick = { viewModel.toggleLiveHud() },
@@ -482,13 +501,39 @@ fun CallScreen(
                 }
             }
 
-            // 6. Bottom Floating Control Bar
+            // Processing Recording Notice
+            if (recordingStatus is RecordingStatus.Processing) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.95f)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CyanGlow),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(24.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(color = CyanGlow, modifier = Modifier.size(24.dp))
+                        Text(
+                            "Finalizing remote video & saving MP4...",
+                            color = SlateTextPrimary,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+
+            // 6. Bottom Floating Control Bar with Dedicated Remote Recording Button
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 18.dp),
+                    .padding(horizontal = 12.dp, vertical = 18.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Card(
@@ -498,8 +543,8 @@ fun CallScreen(
                 ) {
                     Row(
                         modifier = Modifier
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // Mic Mute
@@ -508,7 +553,7 @@ fun CallScreen(
                             contentDescription = if (isMicEnabled) "Mute Mic" else "Unmute Mic",
                             onClick = { viewModel.toggleMicrophone() },
                             isActive = isMicEnabled,
-                            size = 48.dp,
+                            size = 46.dp,
                             testTag = "toggle_mic_button"
                         )
 
@@ -518,7 +563,7 @@ fun CallScreen(
                             contentDescription = if (isCameraEnabled) "Turn off camera" else "Turn on camera",
                             onClick = { viewModel.toggleCamera() },
                             isActive = isCameraEnabled,
-                            size = 48.dp,
+                            size = 46.dp,
                             testTag = "toggle_camera_button"
                         )
 
@@ -528,7 +573,7 @@ fun CallScreen(
                             contentDescription = "Switch Camera",
                             onClick = { viewModel.switchCamera() },
                             isActive = true,
-                            size = 48.dp,
+                            size = 46.dp,
                             testTag = "switch_camera_button"
                         )
 
@@ -538,21 +583,27 @@ fun CallScreen(
                             contentDescription = if (isSpeakerOn) "Speakerphone active" else "Earpiece active",
                             onClick = { viewModel.toggleSpeaker() },
                             isActive = isSpeakerOn,
-                            size = 48.dp,
+                            size = 46.dp,
                             testTag = "toggle_speaker_button"
                         )
 
-                        // Stats & Bitrate Button
-                        CallActionButton(
-                            icon = Icons.Default.Speed,
-                            contentDescription = "View FPS & Bitrate Stats",
+                        // Record Remote Video Button (Highlighted with Red/Pulsing when active)
+                        RecordRemoteActionButton(
+                            isRecording = isCurrentlyRecording,
                             onClick = {
-                                viewModel.fetchStatsNow()
-                                showStatsDialog = true
-                            },
-                            isActive = showLiveHud,
-                            size = 48.dp,
-                            testTag = "bottom_stats_button"
+                                if (callState !is CallState.Connected || remoteVideoTrack == null) {
+                                    Toast.makeText(context, "Remote video stream is not active yet", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    val success = viewModel.toggleRemoteRecording()
+                                    if (!isCurrentlyRecording) {
+                                        if (success) {
+                                            Toast.makeText(context, "Recording remote person video (MP4)", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Unable to start recording", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            }
                         )
 
                         // End Call
@@ -564,13 +615,66 @@ fun CallScreen(
                                 onEndCall()
                             },
                             isDestructive = true,
-                            size = 54.dp,
+                            size = 50.dp,
                             testTag = "end_call_button"
                         )
                     }
                 }
             }
         }
+    }
+
+    // 7. Saved Recording Modal Dialog
+    if (recordingStatus is RecordingStatus.Saved) {
+        val saved = recordingStatus as RecordingStatus.Saved
+        SavedRecordingDialog(
+            saved = saved,
+            onDismiss = { viewModel.dismissRecordingStatus() },
+            onPlay = {
+                try {
+                    val viewIntent = viewModel.createViewRecordingIntent(saved.file, saved.mediaStoreUri)
+                    if (viewIntent != null) {
+                        context.startActivity(viewIntent)
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "No video player app found: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onShare = {
+                try {
+                    val shareIntent = viewModel.createShareRecordingIntent(saved.file, saved.mediaStoreUri)
+                    if (shareIntent != null) {
+                        context.startActivity(Intent.createChooser(shareIntent, "Share Remote Call Recording"))
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Error sharing video: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    // 8. Recording Error Dialog
+    if (recordingStatus is RecordingStatus.Error) {
+        val err = recordingStatus as RecordingStatus.Error
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissRecordingStatus() },
+            title = {
+                Text("Recording Alert", color = SlateTextPrimary, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(err.message, color = SlateTextSecondary)
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.dismissRecordingStatus() },
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanAccent)
+                ) {
+                    Text("OK", color = Color.White)
+                }
+            },
+            containerColor = SlateDark900,
+            shape = RoundedCornerShape(18.dp)
+        )
     }
 
     // Comprehensive Diagnostics & Stats Dialog
@@ -716,6 +820,250 @@ fun CallScreen(
             shape = RoundedCornerShape(22.dp)
         )
     }
+}
+
+@Composable
+fun RecordRemoteActionButton(
+    isRecording: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "recording_pulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.95f,
+        targetValue = 1.15f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
+
+    IconButton(
+        onClick = onClick,
+        modifier = modifier
+            .size(46.dp)
+            .clip(CircleShape)
+            .background(
+                if (isRecording) RoseDestructive else SlateDark800
+            )
+            .border(
+                1.5.dp,
+                if (isRecording) RoseGlow else GlassDarkBorder,
+                CircleShape
+            )
+            .testTag("record_remote_button")
+    ) {
+        if (isRecording) {
+            Box(contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .scale(pulseScale)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color.White)
+                )
+            }
+        } else {
+            Icon(
+                imageVector = Icons.Default.FiberManualRecord,
+                contentDescription = "Record Remote Video Only",
+                tint = RoseGlow,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun ActiveRecordingBadge(
+    durationSeconds: Long,
+    onStopClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "badge_pulse")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dot_alpha"
+    )
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(RoseDestructive.copy(alpha = 0.9f))
+            .border(1.dp, RoseGlow, RoundedCornerShape(50))
+            .clickable { onStopClick() }
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = alpha))
+        )
+        Text(
+            text = "REC ${formatCallDuration(durationSeconds)}",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            color = Color.White
+        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.Black.copy(alpha = 0.35f))
+                .padding(horizontal = 4.dp, vertical = 1.dp)
+        ) {
+            Text(
+                text = "REMOTE",
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Black,
+                color = Color.White
+            )
+        }
+    }
+}
+
+@Composable
+fun SavedRecordingDialog(
+    saved: RecordingStatus.Saved,
+    onDismiss: () -> Unit,
+    onPlay: () -> Unit,
+    onShare: () -> Unit
+) {
+    val sizeMb = saved.fileSizeBytes / (1024.0 * 1024.0)
+    val formattedSize = if (sizeMb >= 1.0) {
+        String.format(Locale.US, "%.1f MB", sizeMb)
+    } else {
+        String.format(Locale.US, "%.0f KB", saved.fileSizeBytes / 1024.0)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = EmeraldGlow,
+                    modifier = Modifier.size(24.dp)
+                )
+                Text(
+                    text = "Remote Video Recorded",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SlateTextPrimary
+                )
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Successfully recorded remote person stream and saved as MP4 to your phone storage.",
+                    fontSize = 13.sp,
+                    color = SlateTextSecondary
+                )
+
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = SlateDark800),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("File Format:", fontSize = 12.sp, color = SlateTextMuted)
+                            Text("MP4 (H.264 AVC)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = CyanGlow)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Recorded Track:", fontSize = 12.sp, color = SlateTextMuted)
+                            Text("Remote Person Only", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = EmeraldGlow)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Duration:", fontSize = 12.sp, color = SlateTextMuted)
+                            Text(formatCallDuration(saved.durationSeconds), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SlateTextPrimary)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("File Size:", fontSize = 12.sp, color = SlateTextMuted)
+                            Text(formattedSize, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SlateTextPrimary)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Storage Folder:", fontSize = 12.sp, color = SlateTextMuted)
+                            Text("Movies / GoCall", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = IndigoLight)
+                        }
+                        HorizontalDivider(color = GlassDarkBorder, modifier = Modifier.padding(vertical = 2.dp))
+                        Text(
+                            text = saved.file.name,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = SlateTextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onShare,
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Share, contentDescription = null, tint = CyanGlow, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Share", color = CyanGlow)
+                }
+
+                Button(
+                    onClick = onPlay,
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanAccent),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Play MP4", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Dismiss", color = SlateTextMuted)
+            }
+        },
+        containerColor = SlateDark900,
+        shape = RoundedCornerShape(22.dp)
+    )
 }
 
 @Composable

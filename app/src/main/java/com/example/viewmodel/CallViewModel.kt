@@ -23,6 +23,11 @@ import org.webrtc.PeerConnection
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
 import com.example.webrtc.WebRtcLiveStats
+import com.example.webrtc.record.RemoteCallRecorder
+import com.example.webrtc.record.RecordingStatus
+import java.io.File
+import android.net.Uri
+import android.content.Intent
 import kotlin.random.Random
 
 sealed class CallState {
@@ -104,6 +109,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _showLiveHud = MutableStateFlow(true)
     val showLiveHud: StateFlow<Boolean> = _showLiveHud.asStateFlow()
 
+    private val _recordingStatus = MutableStateFlow<RecordingStatus>(RecordingStatus.Idle)
+    val recordingStatus: StateFlow<RecordingStatus> = _recordingStatus.asStateFlow()
+
+    private var remoteRecorder: RemoteCallRecorder? = null
     private var durationTimerJob: Job? = null
     private var statsPollingJob: Job? = null
     private var reconnectJob: Job? = null
@@ -144,6 +153,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 client.isCameraEnabled.collect { cam ->
                     _isCameraEnabled.value = cam
+                }
+            }
+
+            val rec = RemoteCallRecorder(getApplication(), client.rootEglBase.eglBaseContext)
+            remoteRecorder = rec
+            viewModelScope.launch {
+                rec.recordingStatus.collect { status ->
+                    _recordingStatus.value = status
                 }
             }
         }
@@ -463,7 +480,50 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         audioManager.toggleSpeaker()
     }
 
+    /**
+     * Toggles recording of ONLY the remote peer's video track.
+     */
+    fun toggleRemoteRecording(): Boolean {
+        val rec = remoteRecorder ?: return false
+        return if (rec.isRecording) {
+            rec.stopRecording()
+            true
+        } else {
+            val track = _remoteVideoTrack.value
+            val room = _currentRoomId.value
+            rec.startRecording(track, room)
+        }
+    }
+
+    fun startRemoteRecording(): Boolean {
+        val rec = remoteRecorder ?: return false
+        val track = _remoteVideoTrack.value
+        val room = _currentRoomId.value
+        return rec.startRecording(track, room)
+    }
+
+    fun stopRemoteRecording() {
+        remoteRecorder?.stopRecording()
+    }
+
+    fun dismissRecordingStatus() {
+        remoteRecorder?.resetStatus()
+    }
+
+    fun createShareRecordingIntent(file: File, mediaUri: Uri?): Intent? {
+        return remoteRecorder?.createShareIntent(file, mediaUri)
+    }
+
+    fun createViewRecordingIntent(file: File, mediaUri: Uri?): Intent? {
+        return remoteRecorder?.createViewIntent(file, mediaUri)
+    }
+
     fun endCall() {
+        // Automatically finalize and save any active recording before closing WebRTC
+        if (remoteRecorder?.isRecording == true) {
+            remoteRecorder?.stopRecording()
+        }
+
         signalingClient.endCall()
         stopDurationTimer()
         stopStatsPolling()
