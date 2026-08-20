@@ -22,6 +22,7 @@ import org.webrtc.IceCandidate
 import org.webrtc.PeerConnection
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
+import com.example.webrtc.WebRtcLiveStats
 import kotlin.random.Random
 
 sealed class CallState {
@@ -97,7 +98,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _stats = MutableStateFlow(CallUiStats())
     val stats: StateFlow<CallUiStats> = _stats.asStateFlow()
 
+    private val _liveStats = MutableStateFlow(WebRtcLiveStats())
+    val liveStats: StateFlow<WebRtcLiveStats> = _liveStats.asStateFlow()
+
+    private val _showLiveHud = MutableStateFlow(true)
+    val showLiveHud: StateFlow<Boolean> = _showLiveHud.asStateFlow()
+
     private var durationTimerJob: Job? = null
+    private var statsPollingJob: Job? = null
     private var reconnectJob: Job? = null
     private var localCandidates = 0
     private var remoteCandidates = 0
@@ -286,6 +294,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         reconnectJob?.cancel()
                         _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
                         startDurationTimer()
+                        startStatsPolling()
                     }
                     PeerConnection.IceConnectionState.DISCONNECTED -> {
                         triggerReconnection("ICE Disconnected")
@@ -375,6 +384,49 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         durationTimerJob = null
     }
 
+    fun startStatsPolling() {
+        if (statsPollingJob != null) return
+        statsPollingJob = viewModelScope.launch {
+            while (isActive) {
+                fetchStatsNow()
+                delay(1000)
+            }
+        }
+    }
+
+    fun stopStatsPolling() {
+        statsPollingJob?.cancel()
+        statsPollingJob = null
+    }
+
+    fun toggleLiveHud() {
+        _showLiveHud.value = !_showLiveHud.value
+    }
+
+    fun setLiveHud(visible: Boolean) {
+        _showLiveHud.value = visible
+    }
+
+    fun fetchStatsNow() {
+        val rtc = webRtcClient ?: return
+        rtc.fetchLiveStats { newStats ->
+            _liveStats.value = newStats.copy(
+                isCaller = _isCaller.value,
+                localCandidatesCount = localCandidates,
+                remoteCandidatesCount = remoteCandidates,
+                reconnectCount = reconnectAttempts
+            )
+            _stats.value = CallUiStats(
+                iceConnectionState = newStats.iceConnectionState,
+                connectionState = newStats.connectionState,
+                isCaller = _isCaller.value,
+                localCandidatesCount = localCandidates,
+                remoteCandidatesCount = remoteCandidates,
+                reconnectCount = reconnectAttempts
+            )
+        }
+    }
+
     private fun updateStats() {
         val rtc = webRtcClient
         _stats.value = CallUiStats(
@@ -414,6 +466,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     fun endCall() {
         signalingClient.endCall()
         stopDurationTimer()
+        stopStatsPolling()
         reconnectJob?.cancel()
 
         webRtcClient?.close()
@@ -424,6 +477,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _callState.value = CallState.Ended("Call ended")
         _callDurationSeconds.value = 0
         _remoteVideoTrack.value = null
+        _liveStats.value = WebRtcLiveStats()
     }
 
     fun resetToIdle() {

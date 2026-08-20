@@ -26,24 +26,31 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PhoneInTalk
+import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -54,11 +61,15 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -110,6 +121,8 @@ import com.example.ui.webrtc.LocalVideoView
 import com.example.ui.webrtc.RemoteVideoView
 import com.example.viewmodel.CallState
 import com.example.viewmodel.CallViewModel
+import com.example.webrtc.WebRtcLiveStats
+import java.util.Locale
 import kotlin.math.roundToInt
 
 @Composable
@@ -130,6 +143,8 @@ fun CallScreen(
     val isFrontCamera by viewModel.isFrontCamera.collectAsState()
     val isSpeakerOn by viewModel.audioManager.isSpeakerOn.collectAsState()
     val stats by viewModel.stats.collectAsState()
+    val liveStats by viewModel.liveStats.collectAsState()
+    val showLiveHud by viewModel.showLiveHud.collectAsState()
 
     var showStatsDialog by remember { mutableStateOf(false) }
 
@@ -273,7 +288,7 @@ fun CallScreen(
                 }
             }
 
-            // 3. Floating Top Bar
+            // 3. Floating Top Bar with Room ID, Duration, and Stats Action
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -340,25 +355,67 @@ fun CallScreen(
                     }
                 }
 
-                // Stats / Info Button
-                IconButton(
-                    onClick = { showStatsDialog = true },
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(GlassDarkControls)
-                        .border(1.dp, GlassDarkBorder, CircleShape)
-                        .testTag("call_stats_button")
+                // Stats Action Buttons (HUD Toggle + Diagnostics modal)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = "Call Stats",
-                        tint = CyanGlow,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    // Floating Live Stats HUD Toggle
+                    IconButton(
+                        onClick = { viewModel.toggleLiveHud() },
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(if (showLiveHud) CyanAccent.copy(alpha = 0.25f) else GlassDarkControls)
+                            .border(1.dp, if (showLiveHud) CyanGlow else GlassDarkBorder, CircleShape)
+                            .testTag("toggle_live_hud_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = "Toggle Live Stats HUD",
+                            tint = if (showLiveHud) CyanGlow else SlateTextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Detailed Diagnostics / Stats Modal Button
+                    IconButton(
+                        onClick = {
+                            viewModel.fetchStatsNow()
+                            showStatsDialog = true
+                        },
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(GlassDarkControls)
+                            .border(1.dp, GlassDarkBorder, CircleShape)
+                            .testTag("call_stats_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.QueryStats,
+                            contentDescription = "Show WebRTC Stats",
+                            tint = CyanGlow,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
 
-            // 4. Floating Local Video PIP View
+            // 4. Live On-Screen Stats HUD (Floating Overlay)
+            if (showLiveHud && callState is CallState.Connected) {
+                LiveStatsHud(
+                    stats = liveStats,
+                    onClose = { viewModel.setLiveHud(false) },
+                    onOpenDetails = {
+                        viewModel.fetchStatsNow()
+                        showStatsDialog = true
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .padding(top = 65.dp, start = 16.dp)
+                )
+            }
+
+            // 5. Floating Local Video PIP View
             if (rtcClient != null) {
                 Box(
                     modifier = Modifier
@@ -425,13 +482,13 @@ fun CallScreen(
                 }
             }
 
-            // 5. Bottom Floating Control Bar
+            // 6. Bottom Floating Control Bar
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 20.dp),
+                    .padding(horizontal = 16.dp, vertical = 18.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Card(
@@ -441,8 +498,8 @@ fun CallScreen(
                 ) {
                     Row(
                         modifier = Modifier
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         // Mic Mute
@@ -451,6 +508,7 @@ fun CallScreen(
                             contentDescription = if (isMicEnabled) "Mute Mic" else "Unmute Mic",
                             onClick = { viewModel.toggleMicrophone() },
                             isActive = isMicEnabled,
+                            size = 48.dp,
                             testTag = "toggle_mic_button"
                         )
 
@@ -460,6 +518,7 @@ fun CallScreen(
                             contentDescription = if (isCameraEnabled) "Turn off camera" else "Turn on camera",
                             onClick = { viewModel.toggleCamera() },
                             isActive = isCameraEnabled,
+                            size = 48.dp,
                             testTag = "toggle_camera_button"
                         )
 
@@ -469,6 +528,7 @@ fun CallScreen(
                             contentDescription = "Switch Camera",
                             onClick = { viewModel.switchCamera() },
                             isActive = true,
+                            size = 48.dp,
                             testTag = "switch_camera_button"
                         )
 
@@ -478,7 +538,21 @@ fun CallScreen(
                             contentDescription = if (isSpeakerOn) "Speakerphone active" else "Earpiece active",
                             onClick = { viewModel.toggleSpeaker() },
                             isActive = isSpeakerOn,
+                            size = 48.dp,
                             testTag = "toggle_speaker_button"
+                        )
+
+                        // Stats & Bitrate Button
+                        CallActionButton(
+                            icon = Icons.Default.Speed,
+                            contentDescription = "View FPS & Bitrate Stats",
+                            onClick = {
+                                viewModel.fetchStatsNow()
+                                showStatsDialog = true
+                            },
+                            isActive = showLiveHud,
+                            size = 48.dp,
+                            testTag = "bottom_stats_button"
                         )
 
                         // End Call
@@ -490,7 +564,7 @@ fun CallScreen(
                                 onEndCall()
                             },
                             isDestructive = true,
-                            size = 60.dp,
+                            size = 54.dp,
                             testTag = "end_call_button"
                         )
                     }
@@ -499,7 +573,7 @@ fun CallScreen(
         }
     }
 
-    // Call Stats & Telemetry Dialog
+    // Comprehensive Diagnostics & Stats Dialog
     if (showStatsDialog) {
         AlertDialog(
             onDismissRequest = { showStatsDialog = false },
@@ -508,37 +582,277 @@ fun CallScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = CyanGlow)
-                    Text("Call Telemetry & Diagnostics", fontSize = 16.sp, color = SlateTextPrimary)
+                    Icon(imageVector = Icons.Default.Speed, contentDescription = null, tint = CyanGlow)
+                    Text("Live WebRTC Stream Stats", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = SlateTextPrimary)
                 }
             },
             text = {
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
                 ) {
-                    StatRow("Room ID", roomId ?: "N/A")
-                    StatRow("Role", if (stats.isCaller) "Caller (Offer)" else "Callee (Answer)")
-                    StatRow("ICE State", stats.iceConnectionState)
-                    StatRow("Peer Connection", stats.connectionState)
-                    StatRow("Local ICE Candidates", "${stats.localCandidatesCount}")
-                    StatRow("Remote ICE Candidates", "${stats.remoteCandidatesCount}")
-                    StatRow("Reconnections Count", "${stats.reconnectCount}")
-                    StatRow("Audio Output", if (isSpeakerOn) "Built-in Speaker" else "Earpiece")
-                    StatRow("STUN Server", "stun.l.google.com:19302")
+                    // Quick HUD toggle switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(SlateDark800)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Floating On-Screen HUD",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = SlateTextPrimary
+                        )
+                        Switch(
+                            checked = showLiveHud,
+                            onCheckedChange = { viewModel.setLiveHud(it) },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = CyanGlow,
+                                checkedTrackColor = IndigoAccent,
+                                uncheckedTrackColor = SlateDark700
+                            )
+                        )
+                    }
+
+                    // Section 1: Inbound Video (Remote Peer)
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = SlateDark800),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "INCOMING VIDEO (PEER)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = CyanGlow
+                            )
+                            HorizontalDivider(color = GlassDarkBorder)
+                            StatRow("FPS (Frames/sec)", formatFps(liveStats.inboundFps))
+                            StatRow("Bitrate", formatBitrate(liveStats.inboundBitrateKbps))
+                            StatRow("Resolution", liveStats.inboundResolution)
+                            StatRow("Video Codec", liveStats.inboundCodec)
+                            StatRow("Jitter", String.format(Locale.US, "%.1f ms", liveStats.jitterMs))
+                            StatRow("Packets Lost", "${liveStats.packetsLost}")
+                            StatRow("Frames Decoded", "${liveStats.framesDecoded}")
+                            StatRow("Frames Dropped", "${liveStats.framesDropped}")
+                        }
+                    }
+
+                    // Section 2: Outbound Video (Self)
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = SlateDark800),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "OUTGOING VIDEO (SELF)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = IndigoLight
+                            )
+                            HorizontalDivider(color = GlassDarkBorder)
+                            StatRow("Send FPS", formatFps(liveStats.outboundFps))
+                            StatRow("Send Bitrate", formatBitrate(liveStats.outboundBitrateKbps))
+                            StatRow("Send Resolution", liveStats.outboundResolution)
+                            StatRow("Send Codec", liveStats.outboundCodec)
+                            StatRow("Avail Outgoing Bandwidth", formatBitrate(liveStats.availableOutgoingBitrateKbps))
+                        }
+                    }
+
+                    // Section 3: Connection & Network
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = SlateDark800),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "NETWORK & NAT TRAVERSAL",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmeraldGlow
+                            )
+                            HorizontalDivider(color = GlassDarkBorder)
+                            StatRow("Round Trip Time (RTT)", String.format(Locale.US, "%.1f ms", liveStats.rttMs))
+                            StatRow("ICE Connection State", liveStats.iceConnectionState)
+                            StatRow("Peer Connection State", liveStats.connectionState)
+                            StatRow("Role", if (liveStats.isCaller) "Caller (Offer)" else "Callee (Answer)")
+                            StatRow("Local ICE Candidates", "${liveStats.localCandidatesCount}")
+                            StatRow("Remote ICE Candidates", "${liveStats.remoteCandidatesCount}")
+                            StatRow("Reconnections Count", "${liveStats.reconnectCount}")
+                            StatRow("Active STUN Server", "stun.l.google.com:19302")
+                        }
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = { showStatsDialog = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = CyanAccent)
+                    colors = ButtonDefaults.buttonColors(containerColor = CyanAccent),
+                    shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text("Close", color = Color.White)
+                    Text("Close", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             },
             containerColor = SlateDark900,
-            shape = RoundedCornerShape(20.dp)
+            shape = RoundedCornerShape(22.dp)
         )
+    }
+}
+
+@Composable
+fun LiveStatsHud(
+    stats: WebRtcLiveStats,
+    onClose: () -> Unit,
+    onOpenDetails: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.88f)),
+        border = androidx.compose.foundation.BorderStroke(1.dp, CyanGlow.copy(alpha = 0.5f)),
+        modifier = modifier
+            .widthIn(max = 240.dp)
+            .clickable { onOpenDetails() }
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(CyanGlow)
+                    )
+                    Text(
+                        text = "LIVE STATS",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = CyanGlow
+                    )
+                }
+
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Hide HUD",
+                    tint = SlateTextMuted,
+                    modifier = Modifier
+                        .size(14.dp)
+                        .clickable { onClose() }
+                )
+            }
+
+            // Inbound FPS & Bitrate
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("In FPS:", fontSize = 11.sp, color = SlateTextSecondary)
+                Text(
+                    formatFps(stats.inboundFps),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = EmeraldGlow
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("In Bitrate:", fontSize = 11.sp, color = SlateTextSecondary)
+                Text(
+                    formatBitrate(stats.inboundBitrateKbps),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = CyanGlow
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Resolution:", fontSize = 11.sp, color = SlateTextSecondary)
+                Text(
+                    stats.inboundResolution,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace,
+                    color = SlateTextPrimary
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Out Bitrate:", fontSize = 11.sp, color = SlateTextSecondary)
+                Text(
+                    formatBitrate(stats.outboundBitrateKbps),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = IndigoLight
+                )
+            }
+
+            if (stats.rttMs > 0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("RTT Ping:", fontSize = 11.sp, color = SlateTextSecondary)
+                    Text(
+                        String.format(Locale.US, "%.0f ms", stats.rttMs),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (stats.rttMs < 100) EmeraldGlow else AmberWarning
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatFps(fps: Double): String {
+    return if (fps > 0) String.format(Locale.US, "%.1f fps", fps) else "-- fps"
+}
+
+private fun formatBitrate(kbps: Double): String {
+    return when {
+        kbps <= 0 -> "-- kbps"
+        kbps >= 1000 -> String.format(Locale.US, "%.2f Mbps", kbps / 1000.0)
+        else -> String.format(Locale.US, "%.0f kbps", kbps)
     }
 }
 

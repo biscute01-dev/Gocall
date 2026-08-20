@@ -24,6 +24,8 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RTCStatsCollectorCallback
+import org.webrtc.RTCStatsReport
 import org.webrtc.RtpReceiver
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
@@ -33,6 +35,29 @@ import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+
+data class WebRtcLiveStats(
+    val inboundFps: Double = 0.0,
+    val inboundBitrateKbps: Double = 0.0,
+    val inboundResolution: String = "--",
+    val inboundCodec: String = "--",
+    val packetsLost: Long = 0,
+    val jitterMs: Double = 0.0,
+    val framesDecoded: Long = 0,
+    val framesDropped: Long = 0,
+    val outboundFps: Double = 0.0,
+    val outboundBitrateKbps: Double = 0.0,
+    val outboundResolution: String = "--",
+    val outboundCodec: String = "--",
+    val rttMs: Double = 0.0,
+    val availableOutgoingBitrateKbps: Double = 0.0,
+    val iceConnectionState: String = "NEW",
+    val connectionState: String = "NEW",
+    val isCaller: Boolean = false,
+    val localCandidatesCount: Int = 0,
+    val remoteCandidatesCount: Int = 0,
+    val reconnectCount: Int = 0
+)
 
 sealed class WebRtcEvent {
     data class IceCandidateGenerated(val candidate: IceCandidate) : WebRtcEvent()
@@ -85,6 +110,13 @@ class WebRtcClient(private val context: Context) {
 
     private val _connectionState = MutableStateFlow(PeerConnection.PeerConnectionState.NEW)
     val connectionState: StateFlow<PeerConnection.PeerConnectionState> = _connectionState.asStateFlow()
+
+    // Real-time WebRTC stats calculation
+    private var lastStatsTimestamp: Long = 0L
+    private var lastBytesReceived: Long = 0L
+    private var lastBytesSent: Long = 0L
+    private var lastInboundBitrateKbps: Double = 0.0
+    private var lastOutboundBitrateKbps: Double = 0.0
 
     // Google Public STUN Servers
     private val googleStunServers = listOf(
@@ -428,6 +460,126 @@ class WebRtcClient(private val context: Context) {
             }
         }
         return null
+    }
+
+    fun fetchLiveStats(onStatsAvailable: (WebRtcLiveStats) -> Unit) {
+        val pc = peerConnection ?: return
+        try {
+            pc.getStats(RTCStatsCollectorCallback { report ->
+                if (report == null) return@RTCStatsCollectorCallback
+                val now = System.currentTimeMillis()
+                val deltaTimeSec = if (lastStatsTimestamp > 0) (now - lastStatsTimestamp) / 1000.0 else 1.0
+
+                var inFps = 0.0
+                var inBytes = 0L
+                var inWidth = 0
+                var inHeight = 0
+                var packetsLost = 0L
+                var jitterSec = 0.0
+                var framesDecoded = 0L
+                var framesDropped = 0L
+                var inCodecId: String? = null
+
+                var outFps = 0.0
+                var outBytes = 0L
+                var outWidth = 0
+                var outHeight = 0
+                var outCodecId: String? = null
+
+                var rttSec = 0.0
+                var availBitrate = 0.0
+
+                val codecMap = mutableMapOf<String, String>()
+
+                for (stats in report.statsMap.values) {
+                    when (stats.type) {
+                        "codec" -> {
+                            val mime = stats.members["mimeType"] as? String
+                            if (mime != null) {
+                                codecMap[stats.id] = mime.replace("video/", "").replace("audio/", "")
+                            }
+                        }
+                        "inbound-rtp" -> {
+                            val kind = stats.members["kind"] as? String ?: stats.members["mediaType"] as? String
+                            if (kind == "video") {
+                                inFps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: inFps
+                                inBytes = (stats.members["bytesReceived"] as? Number)?.toLong() ?: inBytes
+                                inWidth = (stats.members["frameWidth"] as? Number)?.toInt() ?: inWidth
+                                inHeight = (stats.members["frameHeight"] as? Number)?.toInt() ?: inHeight
+                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: packetsLost
+                                jitterSec = (stats.members["jitter"] as? Number)?.toDouble() ?: jitterSec
+                                framesDecoded = (stats.members["framesDecoded"] as? Number)?.toLong() ?: framesDecoded
+                                framesDropped = (stats.members["framesDropped"] as? Number)?.toLong() ?: framesDropped
+                                inCodecId = stats.members["codecId"] as? String
+                            }
+                        }
+                        "outbound-rtp" -> {
+                            val kind = stats.members["kind"] as? String ?: stats.members["mediaType"] as? String
+                            if (kind == "video") {
+                                outFps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: outFps
+                                outBytes = (stats.members["bytesSent"] as? Number)?.toLong() ?: outBytes
+                                outWidth = (stats.members["frameWidth"] as? Number)?.toInt() ?: outWidth
+                                outHeight = (stats.members["frameHeight"] as? Number)?.toInt() ?: outHeight
+                                outCodecId = stats.members["codecId"] as? String
+                            }
+                        }
+                        "candidate-pair" -> {
+                            val nominated = stats.members["nominated"] as? Boolean ?: false
+                            val state = stats.members["state"] as? String
+                            if (nominated || state == "succeeded") {
+                                rttSec = (stats.members["currentRoundTripTime"] as? Number)?.toDouble() ?: rttSec
+                                availBitrate = (stats.members["availableOutgoingBitrate"] as? Number)?.toDouble() ?: availBitrate
+                            }
+                        }
+                    }
+                }
+
+                val inBitrateKbps = if (deltaTimeSec > 0.1 && lastBytesReceived > 0 && inBytes >= lastBytesReceived) {
+                    ((inBytes - lastBytesReceived) * 8.0) / (deltaTimeSec * 1000.0)
+                } else {
+                    lastInboundBitrateKbps
+                }
+
+                val outBitrateKbps = if (deltaTimeSec > 0.1 && lastBytesSent > 0 && outBytes >= lastBytesSent) {
+                    ((outBytes - lastBytesSent) * 8.0) / (deltaTimeSec * 1000.0)
+                } else {
+                    lastOutboundBitrateKbps
+                }
+
+                if (inBytes > 0) lastBytesReceived = inBytes
+                if (outBytes > 0) lastBytesSent = outBytes
+                lastStatsTimestamp = now
+                lastInboundBitrateKbps = inBitrateKbps
+                lastOutboundBitrateKbps = outBitrateKbps
+
+                val inRes = if (inWidth > 0 && inHeight > 0) "${inWidth}x${inHeight}" else "--"
+                val outRes = if (outWidth > 0 && outHeight > 0) "${outWidth}x${outHeight}" else "--"
+                val inCodec = inCodecId?.let { codecMap[it] } ?: "--"
+                val outCodec = outCodecId?.let { codecMap[it] } ?: "--"
+
+                val liveStats = WebRtcLiveStats(
+                    inboundFps = inFps,
+                    inboundBitrateKbps = inBitrateKbps,
+                    inboundResolution = inRes,
+                    inboundCodec = inCodec,
+                    packetsLost = packetsLost,
+                    jitterMs = jitterSec * 1000.0,
+                    framesDecoded = framesDecoded,
+                    framesDropped = framesDropped,
+                    outboundFps = outFps,
+                    outboundBitrateKbps = outBitrateKbps,
+                    outboundResolution = outRes,
+                    outboundCodec = outCodec,
+                    rttMs = rttSec * 1000.0,
+                    availableOutgoingBitrateKbps = availBitrate / 1000.0,
+                    iceConnectionState = _iceConnectionState.value.name,
+                    connectionState = _connectionState.value.name
+                )
+                onStatsAvailable(liveStats)
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching live stats: ${e.message}")
+        }
     }
 
     fun close() {
