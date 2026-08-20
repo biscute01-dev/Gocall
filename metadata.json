@@ -1,6 +1,6 @@
 {
   "name": "One-on-One Video Call",
-  "description": "Peer-to-peer 1-on-1 video calling with WebRTC, Firebase Realtime Database signaling, Google public STUN servers, remote video MP4 recording, live FPS/bitrate stats HUD, and auto reconnection.",
+  "description": "Peer-to-peer 1-on-1 video calling with WebRTC, Firebase Realtime Database signaling, Google public STUN servers, adaptive HD remote video and AAC audio MP4 recording, live FPS/bitrate stats HUD, and auto reconnection.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

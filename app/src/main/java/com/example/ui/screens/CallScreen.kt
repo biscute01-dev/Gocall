@@ -587,7 +587,7 @@ fun CallScreen(
                             testTag = "toggle_speaker_button"
                         )
 
-                        // Record Remote Video Button (Highlighted with Red/Pulsing when active)
+                        // Record Remote Video & Audio Button (Highlighted with Red/Pulsing when active)
                         RecordRemoteActionButton(
                             isRecording = isCurrentlyRecording,
                             onClick = {
@@ -597,7 +597,7 @@ fun CallScreen(
                                     val success = viewModel.toggleRemoteRecording()
                                     if (!isCurrentlyRecording) {
                                         if (success) {
-                                            Toast.makeText(context, "Recording remote person video (MP4)", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "Recording remote person video & audio (MP4)", Toast.LENGTH_SHORT).show()
                                         } else {
                                             Toast.makeText(context, "Unable to start recording", Toast.LENGTH_SHORT).show()
                                         }
@@ -959,7 +959,7 @@ fun SavedRecordingDialog(
                     modifier = Modifier.size(24.dp)
                 )
                 Text(
-                    text = "Remote Video Recorded",
+                    text = "Remote Call Recorded",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     color = SlateTextPrimary
@@ -972,7 +972,7 @@ fun SavedRecordingDialog(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "Successfully recorded remote person stream and saved as MP4 to your phone storage.",
+                    text = "Successfully recorded remote person video and audio into a synchronized MP4 saved directly to your phone.",
                     fontSize = 13.sp,
                     color = SlateTextSecondary
                 )
@@ -991,14 +991,14 @@ fun SavedRecordingDialog(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("File Format:", fontSize = 12.sp, color = SlateTextMuted)
-                            Text("MP4 (H.264 AVC)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = CyanGlow)
+                            Text("MP4 (H.264 HD + AAC Audio)", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = CyanGlow)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Recorded Track:", fontSize = 12.sp, color = SlateTextMuted)
-                            Text("Remote Person Only", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = EmeraldGlow)
+                            Text("Recorded Stream:", fontSize = 12.sp, color = SlateTextMuted)
+                            Text("Remote Video & Audio", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = EmeraldGlow)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),

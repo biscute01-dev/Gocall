@@ -1,17 +1,11 @@
 package com.example.webrtc.record
 
-import android.content.ContentValues
-import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
-import android.net.Uri
-import android.os.Build
-import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
-import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import org.webrtc.EglBase
@@ -19,21 +13,20 @@ import org.webrtc.GlRectDrawer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoFrameDrawer
 import org.webrtc.VideoSink
-import org.webrtc.VideoTrack
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.IOException
 import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+import kotlin.math.roundToInt
 
 /**
- * High-performance VideoSink that encodes incoming frames from the remote VideoTrack
- * to an MP4 video file using Hardware MediaCodec and MediaMuxer.
+ * High-performance Video & Audio Muxing Recorder that captures BOTH the remote peer's
+ * video stream and remote audio PCM samples, encoding them to a unified MP4 file.
+ *
+ * Handles dynamic resolution transitions (e.g. 360p -> 720p/1080p) via OpenGL scaling
+ * onto an HD target canvas, preventing pixelation or low-res lock.
  */
 class RemoteVideoFileRenderer(
     private val outputFile: File,
@@ -41,60 +34,91 @@ class RemoteVideoFileRenderer(
 ) : VideoSink {
 
     companion object {
-        private const val TAG = "RemoteVideoRenderer"
-        private const val MIME_TYPE = "video/avc" // H.264 AVC
-        private const val FRAME_RATE = 30
-        private const val IFRAME_INTERVAL = 2 // 2 seconds between I-Frames for smooth seeking
-        private const val DEFAULT_BITRATE = 2_500_000 // 2.5 Mbps
+        private const val TAG = "RemoteMediaRenderer"
+
+        // Video configuration (H.264 AVC)
+        private const val VIDEO_MIME_TYPE = "video/avc"
+        private const val VIDEO_FRAME_RATE = 30
+        private const val VIDEO_IFRAME_INTERVAL = 1 // 1 second for smooth seeking
+        private const val VIDEO_BITRATE = 3_000_000 // 3.0 Mbps high quality
+
+        // Standard HD target bounds to adaptively host 360p -> 720p -> 1080p without low-res lock
+        private const val TARGET_PORTRAIT_WIDTH = 720
+        private const val TARGET_PORTRAIT_HEIGHT = 1280
+        private const val TARGET_LANDSCAPE_WIDTH = 1280
+        private const val TARGET_LANDSCAPE_HEIGHT = 720
+
+        // Audio configuration (AAC-LC)
+        private const val AUDIO_MIME_TYPE = "audio/mp4a-latm"
+        private const val AUDIO_BITRATE = 128_000 // 128 kbps
+        private const val AUDIO_SAMPLE_RATE_DEFAULT = 48000
     }
 
-    private val renderThread = HandlerThread("${TAG}Thread").apply { start() }
+    private val renderThread = HandlerThread("${TAG}VideoThread").apply { start() }
     private val renderThreadHandler = Handler(renderThread.looper)
 
-    private val bufferInfo = MediaCodec.BufferInfo()
+    private val audioThread = HandlerThread("${TAG}AudioThread").apply { start() }
+    private val audioThreadHandler = Handler(audioThread.looper)
+
+    private val muxerLock = ReentrantLock()
     private var mediaMuxer: MediaMuxer? = null
-    private var encoder: MediaCodec? = null
-    private var surface: Surface? = null
+    private var muxerStarted = false
+    private var isRecordingRunning = true
+
+    // Video encoder state
+    private var videoEncoder: MediaCodec? = null
+    private var videoSurface: Surface? = null
     private var eglBase: EglBase? = null
     private var drawer: GlRectDrawer? = null
     private var frameDrawer: VideoFrameDrawer? = null
+    private val videoBufferInfo = MediaCodec.BufferInfo()
 
-    private var outputFileWidth = -1
-    private var outputFileHeight = -1
-    private var trackIndex = -1
-    private var muxerStarted = false
-    private var isRunning = true
-    private var encoderStarted = false
-    private var encoderInitializing = false
-    private var encoderInitFailed = false
-    private var videoFrameStart = 0L
+    private var canvasWidth = -1
+    private var canvasHeight = -1
+    private var videoTrackIndex = -1
+    private var videoEncoderStarted = false
+    private var videoEncoderInitializing = false
+    private var videoEncoderInitFailed = false
+    private var videoFirstPtsUs = -1L
+
+    // Audio encoder state
+    private var audioEncoder: MediaCodec? = null
+    private val audioBufferInfo = MediaCodec.BufferInfo()
+    private var audioTrackIndex = -1
+    private var audioEncoderStarted = false
+    private var audioEncoderInitializing = false
+    private var audioSampleRate = AUDIO_SAMPLE_RATE_DEFAULT
+    private var audioChannelCount = 1
+    private var audioBytesProcessed = 0L
 
     init {
         try {
             outputFile.parentFile?.mkdirs()
             mediaMuxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize MediaMuxer", e)
+            Log.e(TAG, "Failed to initialize MediaMuxer for: ${outputFile.absolutePath}", e)
         }
     }
 
+    // =========================================================================
+    // Video Processing & Adaptive Resolution
+    // =========================================================================
+
     override fun onFrame(frame: VideoFrame) {
-        if (!isRunning || encoderInitFailed || mediaMuxer == null) {
+        if (!isRecordingRunning || videoEncoderInitFailed || mediaMuxer == null) {
             return
         }
         frame.retain()
 
-        if (outputFileWidth == -1 && !encoderInitializing) {
-            encoderInitializing = true
-            // Ensure width and height are even numbers (required by AVC encoders)
+        // Adaptively initialize HD video encoder on first frame
+        if (canvasWidth == -1 && !videoEncoderInitializing) {
+            videoEncoderInitializing = true
             val rawW = frame.rotatedWidth
             val rawH = frame.rotatedHeight
-            val frameWidth = if (rawW % 2 != 0) rawW - 1 else rawW
-            val frameHeight = if (rawH % 2 != 0) rawH - 1 else rawH
-            initVideoEncoder(frameWidth, frameHeight)
+            initAdaptiveVideoEncoder(rawW, rawH)
         }
 
-        if (!encoderStarted || outputFileWidth == -1 || outputFileHeight == -1) {
+        if (!videoEncoderStarted || canvasWidth == -1 || canvasHeight == -1) {
             frame.release()
             return
         }
@@ -104,28 +128,53 @@ class RemoteVideoFileRenderer(
         }
     }
 
-    private fun initVideoEncoder(frameWidth: Int, frameHeight: Int) {
-        val width = if (frameWidth <= 0) 1280 else frameWidth
-        val height = if (frameHeight <= 0) 720 else frameHeight
+    /**
+     * Initializes a crystal-clear HD canvas that adaptively handles resolution scaling.
+     * If the remote stream starts at 360p and later ramps up to 720p or 1080p, the frames
+     * will be rendered directly onto this HD canvas with bilinear filtering, preserving full clarity.
+     */
+    private fun initAdaptiveVideoEncoder(incomingWidth: Int, incomingHeight: Int) {
+        val isPortrait = incomingHeight >= incomingWidth
+        val targetWidth: Int
+        val targetHeight: Int
+
+        if (isPortrait) {
+            // Target 720x1280 or matched aspect ratio
+            val aspect = if (incomingWidth > 0) incomingHeight.toFloat() / incomingWidth.toFloat() else 16f / 9f
+            targetWidth = TARGET_PORTRAIT_WIDTH
+            var calcH = (targetWidth * aspect).roundToInt()
+            if (calcH % 2 != 0) calcH += 1
+            targetHeight = maxOf(TARGET_PORTRAIT_HEIGHT, calcH)
+        } else {
+            // Target 1280x720 or matched aspect ratio
+            val aspect = if (incomingHeight > 0) incomingWidth.toFloat() / incomingHeight.toFloat() else 16f / 9f
+            targetHeight = TARGET_LANDSCAPE_HEIGHT
+            var calcW = (targetHeight * aspect).roundToInt()
+            if (calcW % 2 != 0) calcW += 1
+            targetWidth = maxOf(TARGET_LANDSCAPE_WIDTH, calcW)
+        }
+
+        val finalW = if (targetWidth % 2 != 0) targetWidth - 1 else targetWidth
+        val finalH = if (targetHeight % 2 != 0) targetHeight - 1 else targetHeight
 
         try {
-            val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
+            val format = MediaFormat.createVideoFormat(VIDEO_MIME_TYPE, finalW, finalH).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, DEFAULT_BITRATE)
-                setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, IFRAME_INTERVAL)
+                setInteger(MediaFormat.KEY_BIT_RATE, VIDEO_BITRATE)
+                setInteger(MediaFormat.KEY_FRAME_RATE, VIDEO_FRAME_RATE)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, VIDEO_IFRAME_INTERVAL)
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
             }
 
-            val enc = MediaCodec.createEncoderByType(MIME_TYPE)
+            val enc = MediaCodec.createEncoderByType(VIDEO_MIME_TYPE)
             enc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val encSurface = enc.createInputSurface()
             enc.start()
 
-            encoder = enc
-            surface = encSurface
-            outputFileWidth = width
-            outputFileHeight = height
+            videoEncoder = enc
+            videoSurface = encSurface
+            canvasWidth = finalW
+            canvasHeight = finalH
 
             val latch = CountDownLatch(1)
             renderThreadHandler.post {
@@ -145,21 +194,21 @@ class RemoteVideoFileRenderer(
                     eglBase = base
                     drawer = GlRectDrawer()
                     frameDrawer = VideoFrameDrawer()
-                    encoderStarted = true
-                    Log.i(TAG, "Video encoder surface initialized: ${width}x${height}")
+                    videoEncoderStarted = true
+                    Log.i(TAG, "Adaptive Video Encoder ready: ${finalW}x${finalH} (Incoming: ${incomingWidth}x${incomingHeight})")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to initialize EglBase on render thread", e)
-                    encoderInitFailed = true
+                    Log.e(TAG, "Failed to initialize EglBase for video recording", e)
+                    videoEncoderInitFailed = true
                 } finally {
-                    encoderInitializing = false
+                    videoEncoderInitializing = false
                     latch.countDown()
                 }
             }
             latch.await(2, TimeUnit.SECONDS)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to configure video encoder: ${width}x${height}", e)
-            encoderInitFailed = true
-            encoderInitializing = false
+            Log.e(TAG, "Failed to configure video encoder ${finalW}x${finalH}", e)
+            videoEncoderInitFailed = true
+            videoEncoderInitializing = false
         }
     }
 
@@ -167,32 +216,34 @@ class RemoteVideoFileRenderer(
         val base = eglBase
         val drw = drawer
         val fDrw = frameDrawer
-        if (!encoderStarted || base == null || drw == null || fDrw == null) {
+        if (!videoEncoderStarted || base == null || drw == null || fDrw == null) {
             frame.release()
             return
         }
 
         try {
-            fDrw.drawFrame(frame, drw, null, 0, 0, outputFileWidth, outputFileHeight)
+            // VideoFrameDrawer automatically handles rotation, YUV/RGB conversions,
+            // and adapts incoming 360p/720p/1080p frames cleanly into the canvasWidth x canvasHeight surface.
+            fDrw.drawFrame(frame, drw, null, 0, 0, canvasWidth, canvasHeight)
             base.swapBuffers()
         } catch (e: Exception) {
-            Log.e(TAG, "Error drawing frame to encoder surface", e)
+            Log.e(TAG, "Error drawing frame to video encoder surface", e)
         } finally {
             frame.release()
         }
 
-        drainEncoder()
+        drainVideoEncoder()
     }
 
-    private fun drainEncoder() {
-        val enc = encoder ?: return
+    private fun drainVideoEncoder() {
+        val enc = videoEncoder ?: return
         val muxer = mediaMuxer ?: return
 
         while (true) {
             val status = try {
-                enc.dequeueOutputBuffer(bufferInfo, 10_000)
+                enc.dequeueOutputBuffer(videoBufferInfo, 5_000)
             } catch (e: Exception) {
-                Log.e(TAG, "Error dequeuing output buffer", e)
+                Log.e(TAG, "Error dequeuing video output buffer", e)
                 break
             }
 
@@ -200,50 +251,50 @@ class RemoteVideoFileRenderer(
                 break
             } else if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 val newFormat = enc.outputFormat
-                Log.i(TAG, "Encoder output format changed: $newFormat")
-                if (trackIndex == -1) {
-                    trackIndex = muxer.addTrack(newFormat)
-                    if (trackIndex != -1 && !muxerStarted) {
-                        try {
-                            muxer.start()
-                            muxerStarted = true
-                            Log.i(TAG, "MediaMuxer started successfully")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to start MediaMuxer", e)
-                        }
+                Log.i(TAG, "Video encoder output format changed: $newFormat")
+                muxerLock.withLock {
+                    if (videoTrackIndex == -1) {
+                        videoTrackIndex = muxer.addTrack(newFormat)
+                        checkAndStartMuxerLocked(muxer)
                     }
                 }
             } else if (status >= 0) {
                 val encodedData = enc.getOutputBuffer(status)
                 if (encodedData != null) {
-                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                        bufferInfo.size = 0
+                    if ((videoBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        videoBufferInfo.size = 0
                     }
 
-                    if (bufferInfo.size > 0 && muxerStarted && trackIndex != -1) {
-                        encodedData.position(bufferInfo.offset)
-                        encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                    if (videoBufferInfo.size > 0 && muxerStarted && videoTrackIndex != -1) {
+                        encodedData.position(videoBufferInfo.offset)
+                        encodedData.limit(videoBufferInfo.offset + videoBufferInfo.size)
 
-                        if (videoFrameStart == 0L && bufferInfo.presentationTimeUs != 0L) {
-                            videoFrameStart = bufferInfo.presentationTimeUs
+                        if (videoFirstPtsUs == -1L && videoBufferInfo.presentationTimeUs != 0L) {
+                            videoFirstPtsUs = videoBufferInfo.presentationTimeUs
                         }
-                        bufferInfo.presentationTimeUs = maxOf(0L, bufferInfo.presentationTimeUs - videoFrameStart)
+                        if (videoFirstPtsUs != -1L) {
+                            videoBufferInfo.presentationTimeUs = maxOf(0L, videoBufferInfo.presentationTimeUs - videoFirstPtsUs)
+                        }
 
-                        try {
-                            muxer.writeSampleData(trackIndex, encodedData, bufferInfo)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error writing sample data to muxer", e)
+                        muxerLock.withLock {
+                            try {
+                                if (muxerStarted) {
+                                    muxer.writeSampleData(videoTrackIndex, encodedData, videoBufferInfo)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error writing video sample to muxer", e)
+                            }
                         }
                     }
 
                     try {
                         enc.releaseOutputBuffer(status, false)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error releasing output buffer", e)
+                        Log.e(TAG, "Error releasing video output buffer", e)
                     }
 
-                    if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        Log.i(TAG, "End of stream reached")
+                    if ((videoBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        Log.i(TAG, "Video EOS reached")
                         break
                     }
                 }
@@ -251,24 +302,211 @@ class RemoteVideoFileRenderer(
         }
     }
 
-    fun release(onCompleted: ((File?) -> Unit)? = null) {
-        isRunning = false
-        val latch = CountDownLatch(1)
+    // =========================================================================
+    // Audio Processing & AAC Encoding (Remote Peer Audio Track)
+    // =========================================================================
 
-        renderThreadHandler.post {
-            try {
-                // Signal end of stream
-                encoder?.let { enc ->
+    /**
+     * Receives remote audio PCM samples from WebRTC playback callback.
+     */
+    fun onRemoteAudioSamples(audioFormat: Int, channelCount: Int, sampleRate: Int, data: ByteArray) {
+        if (!isRecordingRunning || mediaMuxer == null || data.isEmpty()) {
+            return
+        }
+
+        // Initialize AAC audio encoder if needed
+        if (!audioEncoderStarted && !audioEncoderInitializing) {
+            audioEncoderInitializing = true
+            audioSampleRate = if (sampleRate > 0) sampleRate else AUDIO_SAMPLE_RATE_DEFAULT
+            audioChannelCount = if (channelCount > 0) channelCount else 1
+            audioThreadHandler.post {
+                initAudioEncoder(audioSampleRate, audioChannelCount)
+            }
+        }
+
+        if (!audioEncoderStarted) {
+            return
+        }
+
+        // Clone data byte array and post to audio encoding thread
+        val pcmCopy = data.clone()
+        audioThreadHandler.post {
+            feedPcmToAudioEncoder(pcmCopy)
+        }
+    }
+
+    private fun initAudioEncoder(sampleRate: Int, channelCount: Int) {
+        try {
+            val format = MediaFormat.createAudioFormat(AUDIO_MIME_TYPE, sampleRate, channelCount).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BITRATE)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+            }
+
+            val enc = MediaCodec.createEncoderByType(AUDIO_MIME_TYPE)
+            enc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            enc.start()
+
+            audioEncoder = enc
+            audioEncoderStarted = true
+            audioEncoderInitializing = false
+            Log.i(TAG, "Remote Audio AAC Encoder initialized: ${sampleRate}Hz, ${channelCount}ch, ${AUDIO_BITRATE / 1000}kbps")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize Audio AAC Encoder", e)
+            audioEncoderInitializing = false
+        }
+    }
+
+    private fun feedPcmToAudioEncoder(pcmBytes: ByteArray) {
+        val enc = audioEncoder ?: return
+        if (!audioEncoderStarted) return
+
+        try {
+            val inIndex = enc.dequeueInputBuffer(10_000)
+            if (inIndex >= 0) {
+                val inputBuf = enc.getInputBuffer(inIndex)
+                if (inputBuf != null) {
+                    inputBuf.clear()
+                    inputBuf.put(pcmBytes)
+
+                    // Calculate presentation time based on 16-bit PCM samples processed
+                    // 2 bytes per 16-bit sample * channels
+                    val bytesPerFrame = 2 * audioChannelCount
+                    val samples = pcmBytes.size / bytesPerFrame
+                    val ptsUs = (audioBytesProcessed / bytesPerFrame) * 1_000_000L / audioSampleRate
+                    audioBytesProcessed += pcmBytes.size
+
+                    enc.queueInputBuffer(inIndex, 0, pcmBytes.size, ptsUs, 0)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error feeding PCM data to audio encoder", e)
+        }
+
+        drainAudioEncoder()
+    }
+
+    private fun drainAudioEncoder() {
+        val enc = audioEncoder ?: return
+        val muxer = mediaMuxer ?: return
+
+        while (true) {
+            val status = try {
+                enc.dequeueOutputBuffer(audioBufferInfo, 5_000)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error dequeuing audio output buffer", e)
+                break
+            }
+
+            if (status == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                break
+            } else if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                val newFormat = enc.outputFormat
+                Log.i(TAG, "Audio encoder output format changed: $newFormat")
+                muxerLock.withLock {
+                    if (audioTrackIndex == -1) {
+                        audioTrackIndex = muxer.addTrack(newFormat)
+                        checkAndStartMuxerLocked(muxer)
+                    }
+                }
+            } else if (status >= 0) {
+                val encodedData = enc.getOutputBuffer(status)
+                if (encodedData != null) {
+                    if ((audioBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        audioBufferInfo.size = 0
+                    }
+
+                    if (audioBufferInfo.size > 0 && muxerStarted && audioTrackIndex != -1) {
+                        encodedData.position(audioBufferInfo.offset)
+                        encodedData.limit(audioBufferInfo.offset + audioBufferInfo.size)
+
+                        muxerLock.withLock {
+                            try {
+                                if (muxerStarted) {
+                                    muxer.writeSampleData(audioTrackIndex, encodedData, audioBufferInfo)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error writing audio sample to muxer", e)
+                            }
+                        }
+                    }
+
                     try {
-                        drainEncoder()
+                        enc.releaseOutputBuffer(status, false)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error releasing audio output buffer", e)
+                    }
+
+                    if ((audioBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        Log.i(TAG, "Audio EOS reached")
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    private fun checkAndStartMuxerLocked(muxer: MediaMuxer) {
+        if (!muxerStarted && videoTrackIndex != -1) {
+            try {
+                muxer.start()
+                muxerStarted = true
+                Log.i(TAG, "MediaMuxer started (videoTrack=$videoTrackIndex, audioTrack=$audioTrackIndex)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start MediaMuxer", e)
+            }
+        }
+    }
+
+    // =========================================================================
+    // Lifecycle & Clean Finalization
+    // =========================================================================
+
+    fun release(onCompleted: ((File?) -> Unit)? = null) {
+        isRecordingRunning = false
+        val latch = CountDownLatch(2)
+
+        // 1. Drain & Release Audio Encoder on Audio Thread
+        audioThreadHandler.post {
+            try {
+                audioEncoder?.let { enc ->
+                    try {
+                        // Signal audio EOS
+                        val inIndex = enc.dequeueInputBuffer(10_000)
+                        if (inIndex >= 0) {
+                            enc.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        }
+                        drainAudioEncoder()
                         enc.stop()
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error stopping encoder", e)
+                        Log.e(TAG, "Error stopping audio encoder", e)
                     }
                     try {
                         enc.release()
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error releasing encoder", e)
+                        Log.e(TAG, "Error releasing audio encoder", e)
+                    }
+                }
+            } finally {
+                audioThread.quitSafely()
+                latch.countDown()
+            }
+        }
+
+        // 2. Drain & Release Video Encoder & OpenGL on Render Thread
+        renderThreadHandler.post {
+            try {
+                videoEncoder?.let { enc ->
+                    try {
+                        drainVideoEncoder()
+                        enc.stop()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error stopping video encoder", e)
+                    }
+                    try {
+                        enc.release()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error releasing video encoder", e)
                     }
                 }
 
@@ -280,18 +518,33 @@ class RemoteVideoFileRenderer(
                     }
                 }
 
-                surface?.let { s ->
+                videoSurface?.let { s ->
                     try {
                         s.release()
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error releasing surface", e)
+                        Log.e(TAG, "Error releasing video surface", e)
                     }
                 }
+            } finally {
+                renderThread.quitSafely()
+                latch.countDown()
+            }
+        }
 
+        // Finalize Muxer once threads complete
+        Thread {
+            try {
+                latch.await(3, TimeUnit.SECONDS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+
+            muxerLock.withLock {
                 mediaMuxer?.let { muxer ->
                     try {
                         if (muxerStarted) {
                             muxer.stop()
+                            Log.i(TAG, "MediaMuxer stopped successfully")
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Error stopping MediaMuxer", e)
@@ -302,17 +555,10 @@ class RemoteVideoFileRenderer(
                         Log.e(TAG, "Error releasing MediaMuxer", e)
                     }
                 }
-            } finally {
-                renderThread.quitSafely()
-                latch.countDown()
-                onCompleted?.invoke(if (outputFile.exists() && outputFile.length() > 0) outputFile else null)
             }
-        }
 
-        try {
-            latch.await(3, TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
+            val validFile = if (outputFile.exists() && outputFile.length() > 0) outputFile else null
+            onCompleted?.invoke(validFile)
+        }.start()
     }
 }

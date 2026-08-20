@@ -481,7 +481,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Toggles recording of ONLY the remote peer's video track.
+     * Toggles recording of the remote peer's video track and audio stream.
      */
     fun toggleRemoteRecording(): Boolean {
         val rec = remoteRecorder ?: return false
@@ -491,7 +491,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             val track = _remoteVideoTrack.value
             val room = _currentRoomId.value
-            rec.startRecording(track, room)
+            rec.startRecording(track, room, webRtcClient)
         }
     }
 
@@ -499,7 +499,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         val rec = remoteRecorder ?: return false
         val track = _remoteVideoTrack.value
         val room = _currentRoomId.value
-        return rec.startRecording(track, room)
+        return rec.startRecording(track, room, webRtcClient)
     }
 
     fun stopRemoteRecording() {

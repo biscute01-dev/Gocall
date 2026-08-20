@@ -9,6 +9,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.FileProvider
+import com.example.webrtc.WebRtcClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,6 +56,7 @@ class RemoteCallRecorder(
     private val scope = CoroutineScope(Dispatchers.Main)
     private var videoRenderer: RemoteVideoFileRenderer? = null
     private var currentRecordedVideoTrack: VideoTrack? = null
+    private var currentRtcClient: WebRtcClient? = null
     private var activeOutputFile: File? = null
     private var timerJob: Job? = null
     private var recordedDuration: Long = 0L
@@ -66,9 +68,9 @@ class RemoteCallRecorder(
         get() = _recordingStatus.value is RecordingStatus.Recording
 
     /**
-     * Starts recording only the remote person's video track.
+     * Starts recording only the remote person's video track and remote audio stream.
      */
-    fun startRecording(remoteTrack: VideoTrack?, roomId: String?): Boolean {
+    fun startRecording(remoteTrack: VideoTrack?, roomId: String?, rtcClient: WebRtcClient? = null): Boolean {
         if (isRecording) {
             Log.w(TAG, "Recording is already active")
             return false
@@ -82,17 +84,23 @@ class RemoteCallRecorder(
         try {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
             val roomTag = if (!roomId.isNullOrBlank()) "Room_${roomId}_" else ""
-            val fileName = "RemoteVideo_${roomTag}${timestamp}.mp4"
+            val fileName = "RemoteCall_${roomTag}${timestamp}.mp4"
 
             // Temp recording file in cache/external files directory
             val moviesDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir
             val outputFile = File(moviesDir, fileName)
             activeOutputFile = outputFile
             currentRecordedVideoTrack = remoteTrack
+            currentRtcClient = rtcClient
 
             val renderer = RemoteVideoFileRenderer(outputFile, sharedEglContext)
             videoRenderer = renderer
             remoteTrack.addSink(renderer)
+
+            // Hook up remote audio listener to capture remote person's audio
+            rtcClient?.remoteAudioListener = { audioFormat, channelCount, sampleRate, data ->
+                renderer.onRemoteAudioSamples(audioFormat, channelCount, sampleRate, data)
+            }
 
             recordedDuration = 0L
             _recordingStatus.value = RecordingStatus.Recording(0L, outputFile.absolutePath)
@@ -111,17 +119,17 @@ class RemoteCallRecorder(
                 }
             }
 
-            Log.i(TAG, "Started recording remote video to: ${outputFile.absolutePath}")
+            Log.i(TAG, "Started recording remote video + audio to: ${outputFile.absolutePath}")
             return true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start remote video recording", e)
+            Log.e(TAG, "Failed to start remote video/audio recording", e)
             _recordingStatus.value = RecordingStatus.Error("Failed to start recording: ${e.localizedMessage}")
             return false
         }
     }
 
     /**
-     * Stops recording, releases hardware encoder and saves the MP4 into device storage.
+     * Stops recording, releases hardware encoders and saves the MP4 into device storage.
      */
     fun stopRecording(onFinished: ((RecordingStatus.Saved?) -> Unit)? = null) {
         if (!isRecording && _recordingStatus.value !is RecordingStatus.Recording) {
@@ -133,12 +141,16 @@ class RemoteCallRecorder(
 
         val finalDuration = recordedDuration
         val track = currentRecordedVideoTrack
+        val rtc = currentRtcClient
         val renderer = videoRenderer
         val file = activeOutputFile
 
         _recordingStatus.value = RecordingStatus.Processing
 
-        // Detach sink
+        // Detach audio listener
+        rtc?.remoteAudioListener = null
+
+        // Detach video sink
         track?.let {
             try {
                 if (renderer != null) {
@@ -170,6 +182,7 @@ class RemoteCallRecorder(
                     }
                     videoRenderer = null
                     currentRecordedVideoTrack = null
+                    currentRtcClient = null
                     activeOutputFile = null
                 }
             }

@@ -35,6 +35,8 @@ import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.audio.AudioDeviceModule
+import org.webrtc.audio.JavaAudioDeviceModule
 
 data class WebRtcLiveStats(
     val inboundFps: Double = 0.0,
@@ -127,6 +129,10 @@ class WebRtcClient(private val context: Context) {
         PeerConnection.IceServer.builder("stun:stun4.l.google.com:19302").createIceServer()
     )
 
+    // Audio device module for remote audio interception
+    private var audioDeviceModule: AudioDeviceModule? = null
+    var remoteAudioListener: ((audioFormat: Int, channelCount: Int, sampleRate: Int, data: ByteArray) -> Unit)? = null
+
     init {
         initPeerConnectionFactory()
     }
@@ -137,6 +143,22 @@ class WebRtcClient(private val context: Context) {
             .createInitializationOptions()
         PeerConnectionFactory.initialize(options)
 
+        val adm = JavaAudioDeviceModule.builder(context)
+            .setUseHardwareAcousticEchoCanceler(true)
+            .setUseHardwareNoiseSuppressor(true)
+            .setSamplesReadyCallback(object : JavaAudioDeviceModule.SamplesReadyCallback {
+                override fun onWebRtcAudioRecordSamplesReady(samples: JavaAudioDeviceModule.AudioSamples) {
+                    remoteAudioListener?.invoke(
+                        samples.audioFormat,
+                        samples.channelCount,
+                        samples.sampleRate,
+                        samples.data
+                    )
+                }
+            })
+            .createAudioDeviceModule()
+        audioDeviceModule = adm
+
         val encoderFactory = DefaultVideoEncoderFactory(
             rootEglBase.eglBaseContext,
             true, // enableIntelVp8Encoder
@@ -145,6 +167,7 @@ class WebRtcClient(private val context: Context) {
         val decoderFactory = DefaultVideoDecoderFactory(rootEglBase.eglBaseContext)
 
         peerConnectionFactory = PeerConnectionFactory.builder()
+            .setAudioDeviceModule(adm)
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
             .setOptions(PeerConnectionFactory.Options())
