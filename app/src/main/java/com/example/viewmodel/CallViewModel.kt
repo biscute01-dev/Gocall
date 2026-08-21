@@ -112,6 +112,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _recordingStatus = MutableStateFlow<RecordingStatus>(RecordingStatus.Idle)
     val recordingStatus: StateFlow<RecordingStatus> = _recordingStatus.asStateFlow()
 
+    private val _isInPipMode = MutableStateFlow(false)
+    val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
+
+    fun setInPipMode(inPip: Boolean) {
+        _isInPipMode.value = inPip
+    }
+
     private var remoteRecorder: RemoteCallRecorder? = null
     private var durationTimerJob: Job? = null
     private var statsPollingJob: Job? = null

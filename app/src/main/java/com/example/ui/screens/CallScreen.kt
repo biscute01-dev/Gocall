@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PhoneInTalk
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Refresh
@@ -137,6 +138,7 @@ import kotlin.math.roundToInt
 fun CallScreen(
     viewModel: CallViewModel,
     onEndCall: () -> Unit,
+    onEnterPip: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -154,12 +156,9 @@ fun CallScreen(
     val liveStats by viewModel.liveStats.collectAsState()
     val showLiveHud by viewModel.showLiveHud.collectAsState()
     val recordingStatus by viewModel.recordingStatus.collectAsState()
+    val isInPipMode by viewModel.isInPipMode.collectAsState()
 
     var showStatsDialog by remember { mutableStateOf(false) }
-
-    // PIP draggable offset state
-    var pipOffsetX by remember { mutableStateOf(0f) }
-    var pipOffsetY by remember { mutableStateOf(0f) }
 
     val rtcClient = viewModel.webRtcClient
     val isCurrentlyRecording = recordingStatus is RecordingStatus.Recording
@@ -246,385 +245,340 @@ fun CallScreen(
                 }
             }
 
-            // 2. Reconnecting Top Banner (when in reconnecting state during call)
-            if (callState is CallState.Reconnecting) {
-                val reconState = callState as CallState.Reconnecting
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .padding(top = 60.dp, start = 16.dp, end = 16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Card(
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = AmberWarning.copy(alpha = 0.9f)),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.4f))
+            // Only display interactive UI controls and HUDs when NOT in PiP mode
+            if (!isInPipMode) {
+                // 2. Reconnecting Top Banner (when in reconnecting state during call)
+                if (callState is CallState.Reconnecting) {
+                    val reconState = callState as CallState.Reconnecting
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(top = 60.dp, start = 16.dp, end = 16.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = AmberWarning.copy(alpha = 0.9f)),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.4f))
                         ) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Reconnecting (Attempt #${reconState.attempt})...",
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 13.sp
-                                )
-                                Text(
-                                    text = "ICE Restarting over Google STUN",
-                                    color = Color.White.copy(alpha = 0.85f),
-                                    fontSize = 11.sp
-                                )
-                            }
-                            Button(
-                                onClick = { viewModel.forceIceRestart() },
-                                colors = ButtonDefaults.buttonColors(containerColor = SlateDark950),
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(32.dp)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text("Retry", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Reconnecting (Attempt #${reconState.attempt})...",
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                    Text(
+                                        text = "ICE Restarting over Google STUN",
+                                        color = Color.White.copy(alpha = 0.85f),
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                Button(
+                                    onClick = { viewModel.forceIceRestart() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = SlateDark950),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Text("Retry", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // 3. Floating Top Bar with Room ID, Duration, Remote Recording Pill, and Stats Action
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Room ID & Duration Pill
+                // 3. Floating Top Bar with Room ID, Duration, Remote Recording Pill, PiP, and Stats Action
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(GlassDarkControls)
-                        .border(1.dp, GlassDarkBorder, RoundedCornerShape(50))
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
+                    // Room ID & Duration Pill
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (callState is CallState.Connected) EmeraldConnected else AmberWarning
-                            )
-                    )
-                    Text(
-                        text = roomId ?: "",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        fontFamily = FontFamily.Monospace,
-                        color = SlateTextPrimary
-                    )
-                    IconButton(
-                        onClick = {
-                            roomId?.let {
-                                clipboardManager.setText(AnnotatedString(it))
-                                Toast.makeText(context, "Room ID copied", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        modifier = Modifier.size(20.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(GlassDarkControls)
+                            .border(1.dp, GlassDarkBorder, RoundedCornerShape(50))
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy room ID",
-                            tint = CyanGlow,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-
-                    if (callState is CallState.Connected) {
                         Box(
                             modifier = Modifier
-                                .width(1.dp)
-                                .height(12.dp)
-                                .background(SlateDark700)
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (callState is CallState.Connected) EmeraldConnected else AmberWarning
+                                )
                         )
                         Text(
-                            text = formatCallDuration(durationSeconds),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = EmeraldGlow
+                            text = roomId ?: "",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            fontFamily = FontFamily.Monospace,
+                            color = SlateTextPrimary
                         )
+                        IconButton(
+                            onClick = {
+                                roomId?.let {
+                                    clipboardManager.setText(AnnotatedString(it))
+                                    Toast.makeText(context, "Room ID copied", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.size(20.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "Copy room ID",
+                                tint = CyanGlow,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+
+                        if (callState is CallState.Connected) {
+                            Box(
+                                modifier = Modifier
+                                    .width(1.dp)
+                                    .height(12.dp)
+                                    .background(SlateDark700)
+                            )
+                            Text(
+                                text = formatCallDuration(durationSeconds),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmeraldGlow
+                            )
+                        }
+                    }
+
+                    // Top Right Action Buttons (Active Recording Indicator + PiP + HUD Toggle + Diagnostics modal)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Active Recording Top Pill
+                        if (isCurrentlyRecording) {
+                            val recState = recordingStatus as RecordingStatus.Recording
+                            ActiveRecordingBadge(
+                                durationSeconds = recState.durationSeconds,
+                                onStopClick = { viewModel.stopRemoteRecording() }
+                            )
+                        }
+
+                        // Picture-in-Picture Mode Button
+                        IconButton(
+                            onClick = { onEnterPip() },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(GlassDarkControls)
+                                .border(1.dp, GlassDarkBorder, CircleShape)
+                                .testTag("enter_pip_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PictureInPictureAlt,
+                                contentDescription = "Enter Picture in Picture",
+                                tint = CyanGlow,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Floating Live Stats HUD Toggle
+                        IconButton(
+                            onClick = { viewModel.toggleLiveHud() },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (showLiveHud) CyanAccent.copy(alpha = 0.25f) else GlassDarkControls)
+                                .border(1.dp, if (showLiveHud) CyanGlow else GlassDarkBorder, CircleShape)
+                                .testTag("toggle_live_hud_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Speed,
+                                contentDescription = "Toggle Live Stats HUD",
+                                tint = if (showLiveHud) CyanGlow else SlateTextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Detailed Diagnostics / Stats Modal Button
+                        IconButton(
+                            onClick = {
+                                viewModel.fetchStatsNow()
+                                showStatsDialog = true
+                            },
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(GlassDarkControls)
+                                .border(1.dp, GlassDarkBorder, CircleShape)
+                                .testTag("call_stats_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.QueryStats,
+                                contentDescription = "Show WebRTC Stats",
+                                tint = CyanGlow,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
 
-                // Top Right Action Buttons (Active Recording Indicator + HUD Toggle + Diagnostics modal)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Active Recording Top Pill
-                    if (isCurrentlyRecording) {
-                        val recState = recordingStatus as RecordingStatus.Recording
-                        ActiveRecordingBadge(
-                            durationSeconds = recState.durationSeconds,
-                            onStopClick = { viewModel.stopRemoteRecording() }
-                        )
-                    }
-
-                    // Floating Live Stats HUD Toggle
-                    IconButton(
-                        onClick = { viewModel.toggleLiveHud() },
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(if (showLiveHud) CyanAccent.copy(alpha = 0.25f) else GlassDarkControls)
-                            .border(1.dp, if (showLiveHud) CyanGlow else GlassDarkBorder, CircleShape)
-                            .testTag("toggle_live_hud_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Speed,
-                            contentDescription = "Toggle Live Stats HUD",
-                            tint = if (showLiveHud) CyanGlow else SlateTextSecondary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // Detailed Diagnostics / Stats Modal Button
-                    IconButton(
-                        onClick = {
+                // 4. Live On-Screen Stats HUD (Floating Overlay)
+                if (showLiveHud && callState is CallState.Connected) {
+                    LiveStatsHud(
+                        stats = liveStats,
+                        onClose = { viewModel.setLiveHud(false) },
+                        onOpenDetails = {
                             viewModel.fetchStatsNow()
                             showStatsDialog = true
                         },
                         modifier = Modifier
-                            .clip(CircleShape)
-                            .background(GlassDarkControls)
-                            .border(1.dp, GlassDarkBorder, CircleShape)
-                            .testTag("call_stats_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.QueryStats,
-                            contentDescription = "Show WebRTC Stats",
-                            tint = CyanGlow,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                            .align(Alignment.TopStart)
+                            .statusBarsPadding()
+                            .padding(top = 65.dp, start = 16.dp)
+                    )
                 }
-            }
 
-            // 4. Live On-Screen Stats HUD (Floating Overlay)
-            if (showLiveHud && callState is CallState.Connected) {
-                LiveStatsHud(
-                    stats = liveStats,
-                    onClose = { viewModel.setLiveHud(false) },
-                    onOpenDetails = {
-                        viewModel.fetchStatsNow()
-                        showStatsDialog = true
-                    },
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .statusBarsPadding()
-                        .padding(top = 65.dp, start = 16.dp)
-                )
-            }
-
-            // 5. Floating Local Video PIP View
-            if (rtcClient != null) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(top = 70.dp, end = 16.dp)
-                        .offset { IntOffset(pipOffsetX.roundToInt(), pipOffsetY.roundToInt()) }
-                        .pointerInput(Unit) {
-                            detectDragGestures { change, dragAmount ->
-                                change.consume()
-                                pipOffsetX += dragAmount.x
-                                pipOffsetY += dragAmount.y
-                            }
-                        }
-                        .size(width = 110.dp, height = 160.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(SlateDark900)
-                        .border(
-                            1.5.dp,
-                            Brush.linearGradient(listOf(CyanGlow.copy(alpha = 0.8f), IndigoAccent.copy(alpha = 0.5f))),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .testTag("local_video_pip")
-                ) {
-                    if (isCameraEnabled) {
-                        LocalVideoView(
-                            webRtcClient = rtcClient,
-                            isMirror = isFrontCamera,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(SlateDark800),
-                            contentAlignment = Alignment.Center
+                // Processing Recording Notice
+                if (recordingStatus is RecordingStatus.Processing) {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.95f)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, CyanGlow),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.VideocamOff,
-                                contentDescription = "Camera Off",
-                                tint = SlateTextMuted,
-                                modifier = Modifier.size(28.dp)
+                            CircularProgressIndicator(color = CyanGlow, modifier = Modifier.size(24.dp))
+                            Text(
+                                "Finalizing remote video & saving MP4...",
+                                color = SlateTextPrimary,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
                             )
                         }
                     }
-
-                    // Mini switch camera button on PIP
-                    IconButton(
-                        onClick = { viewModel.switchCamera() },
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(4.dp)
-                            .size(28.dp)
-                            .clip(CircleShape)
-                            .background(GlassDarkControls)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Cameraswitch,
-                            contentDescription = "Switch camera",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
                 }
-            }
 
-            // Processing Recording Notice
-            if (recordingStatus is RecordingStatus.Processing) {
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.95f)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, CyanGlow),
+                // 5. Bottom Floating Control Bar with Dedicated Remote Recording Button
+                Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(24.dp)
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 18.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    Card(
+                        shape = RoundedCornerShape(32.dp),
+                        colors = CardDefaults.cardColors(containerColor = GlassDarkControls),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
                     ) {
-                        CircularProgressIndicator(color = CyanGlow, modifier = Modifier.size(24.dp))
-                        Text(
-                            "Finalizing remote video & saving MP4...",
-                            color = SlateTextPrimary,
-                            fontWeight = FontWeight.Medium,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-            }
+                        Row(
+                            modifier = Modifier
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Mic Mute
+                            CallActionButton(
+                                icon = if (isMicEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                                contentDescription = if (isMicEnabled) "Mute Mic" else "Unmute Mic",
+                                onClick = { viewModel.toggleMicrophone() },
+                                isActive = isMicEnabled,
+                                size = 46.dp,
+                                testTag = "toggle_mic_button"
+                            )
 
-            // 6. Bottom Floating Control Bar with Dedicated Remote Recording Button
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 18.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Card(
-                    shape = RoundedCornerShape(32.dp),
-                    colors = CardDefaults.cardColors(containerColor = GlassDarkControls),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Mic Mute
-                        CallActionButton(
-                            icon = if (isMicEnabled) Icons.Default.Mic else Icons.Default.MicOff,
-                            contentDescription = if (isMicEnabled) "Mute Mic" else "Unmute Mic",
-                            onClick = { viewModel.toggleMicrophone() },
-                            isActive = isMicEnabled,
-                            size = 46.dp,
-                            testTag = "toggle_mic_button"
-                        )
+                            // Camera Toggle
+                            CallActionButton(
+                                icon = if (isCameraEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
+                                contentDescription = if (isCameraEnabled) "Turn off camera" else "Turn on camera",
+                                onClick = { viewModel.toggleCamera() },
+                                isActive = isCameraEnabled,
+                                size = 46.dp,
+                                testTag = "toggle_camera_button"
+                            )
 
-                        // Camera Toggle
-                        CallActionButton(
-                            icon = if (isCameraEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
-                            contentDescription = if (isCameraEnabled) "Turn off camera" else "Turn on camera",
-                            onClick = { viewModel.toggleCamera() },
-                            isActive = isCameraEnabled,
-                            size = 46.dp,
-                            testTag = "toggle_camera_button"
-                        )
+                            // Switch Camera (Front / Back)
+                            CallActionButton(
+                                icon = Icons.Default.Cameraswitch,
+                                contentDescription = "Switch Camera",
+                                onClick = { viewModel.switchCamera() },
+                                isActive = true,
+                                size = 46.dp,
+                                testTag = "switch_camera_button"
+                            )
 
-                        // Switch Camera (Front / Back)
-                        CallActionButton(
-                            icon = Icons.Default.Cameraswitch,
-                            contentDescription = "Switch Camera",
-                            onClick = { viewModel.switchCamera() },
-                            isActive = true,
-                            size = 46.dp,
-                            testTag = "switch_camera_button"
-                        )
+                            // Audio Route (Speaker / Earpiece)
+                            CallActionButton(
+                                icon = if (isSpeakerOn) Icons.Default.VolumeUp else Icons.Default.PhoneInTalk,
+                                contentDescription = if (isSpeakerOn) "Speakerphone active" else "Earpiece active",
+                                onClick = { viewModel.toggleSpeaker() },
+                                isActive = isSpeakerOn,
+                                size = 46.dp,
+                                testTag = "toggle_speaker_button"
+                            )
 
-                        // Audio Route (Speaker / Earpiece)
-                        CallActionButton(
-                            icon = if (isSpeakerOn) Icons.Default.VolumeUp else Icons.Default.PhoneInTalk,
-                            contentDescription = if (isSpeakerOn) "Speakerphone active" else "Earpiece active",
-                            onClick = { viewModel.toggleSpeaker() },
-                            isActive = isSpeakerOn,
-                            size = 46.dp,
-                            testTag = "toggle_speaker_button"
-                        )
-
-                        // Record Remote Video & Audio Button (Highlighted with Red/Pulsing when active)
-                        RecordRemoteActionButton(
-                            isRecording = isCurrentlyRecording,
-                            onClick = {
-                                if (callState !is CallState.Connected || remoteVideoTrack == null) {
-                                    Toast.makeText(context, "Remote video stream is not active yet", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    val success = viewModel.toggleRemoteRecording()
-                                    if (!isCurrentlyRecording) {
-                                        if (success) {
-                                            Toast.makeText(context, "Recording remote person video & audio (MP4)", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            Toast.makeText(context, "Unable to start recording", Toast.LENGTH_SHORT).show()
+                            // Record Remote Video & Audio Button (Highlighted with Red/Pulsing when active)
+                            RecordRemoteActionButton(
+                                isRecording = isCurrentlyRecording,
+                                onClick = {
+                                    if (callState !is CallState.Connected || remoteVideoTrack == null) {
+                                        Toast.makeText(context, "Remote video stream is not active yet", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        val success = viewModel.toggleRemoteRecording()
+                                        if (!isCurrentlyRecording) {
+                                            if (success) {
+                                                Toast.makeText(context, "Recording remote person video & audio (MP4)", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Unable to start recording", Toast.LENGTH_SHORT).show()
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        )
+                            )
 
-                        // End Call
-                        CallActionButton(
-                            icon = Icons.Default.CallEnd,
-                            contentDescription = "End Call",
-                            onClick = {
-                                viewModel.endCall()
-                                onEndCall()
-                            },
-                            isDestructive = true,
-                            size = 50.dp,
-                            testTag = "end_call_button"
-                        )
+                            // End Call
+                            CallActionButton(
+                                icon = Icons.Default.CallEnd,
+                                contentDescription = "End Call",
+                                onClick = {
+                                    viewModel.endCall()
+                                    onEndCall()
+                                },
+                                isDestructive = true,
+                                size = 50.dp,
+                                testTag = "end_call_button"
+                            )
+                        }
                     }
                 }
             }
         }
     }
 
-    // 7. Saved Recording Modal Dialog
+    // Dialogs only displayed when NOT in Picture-in-Picture mode
+    if (!isInPipMode) {
+        // 7. Saved Recording Modal Dialog
     if (recordingStatus is RecordingStatus.Saved) {
         val saved = recordingStatus as RecordingStatus.Saved
         SavedRecordingDialog(
@@ -819,6 +773,7 @@ fun CallScreen(
             containerColor = SlateDark900,
             shape = RoundedCornerShape(22.dp)
         )
+    }
     }
 }
 
