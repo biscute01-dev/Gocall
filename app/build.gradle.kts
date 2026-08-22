@@ -80,6 +80,7 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   implementation(libs.stream.webrtc.android)
   implementation(libs.firebase.database)
+  implementation(libs.firebase.messaging)
   implementation(libs.androidx.navigation.compose)
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)

@@ -10,6 +10,8 @@ import com.example.auth.CallInvitation
 import com.example.auth.FriendUser
 import com.example.auth.FriendsRepository
 import com.example.auth.UserProfile
+import com.example.notification.NotificationHelper
+import com.example.service.CallForegroundService
 import com.example.signaling.IceCandidateModel
 import com.example.signaling.SignalingClient
 import com.example.signaling.SignalingEvent
@@ -60,6 +62,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         private const val PREFS_NAME = "video_call_prefs"
         private const val KEY_CUSTOM_RTDB = "custom_rtdb_url"
         private const val KEY_RECENT_ROOMS = "recent_rooms"
+
+        @Volatile
+        var activeInstance: CallViewModel? = null
+            private set
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -109,6 +115,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
 
+    private val _isRemoteCameraEnabled = MutableStateFlow(true)
+    val isRemoteCameraEnabled: StateFlow<Boolean> = _isRemoteCameraEnabled.asStateFlow()
+
+    private val _isRemoteMicEnabled = MutableStateFlow(true)
+    val isRemoteMicEnabled: StateFlow<Boolean> = _isRemoteMicEnabled.asStateFlow()
+
     private val _isMicEnabled = MutableStateFlow(true)
     val isMicEnabled: StateFlow<Boolean> = _isMicEnabled.asStateFlow()
 
@@ -154,6 +166,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectAttempts = 0
 
     init {
+        activeInstance = this
         observeSignalingEvents()
     }
 
@@ -255,9 +268,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
+        _isRemoteCameraEnabled.value = true
+        _isRemoteMicEnabled.value = true
 
         initWebRtc()
         audioManager.start()
+        CallForegroundService.startService(getApplication(), friend.displayName, callId)
 
         val rtc = webRtcClient ?: return
         rtc.createPeerConnection()
@@ -289,9 +305,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
+        _isRemoteCameraEnabled.value = true
+        _isRemoteMicEnabled.value = true
 
         initWebRtc()
         audioManager.start()
+        CallForegroundService.startService(getApplication(), invitation.callerDisplayName, callId)
 
         val rtc = webRtcClient ?: return
         rtc.createPeerConnection()
@@ -337,9 +356,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         remoteCandidates = 0
         reconnectAttempts = 0
         saveRecentRoom(cleanId)
+        _isRemoteCameraEnabled.value = true
+        _isRemoteMicEnabled.value = true
 
         initWebRtc()
         audioManager.start()
+        CallForegroundService.startService(getApplication(), "Room $cleanId", cleanId)
 
         val rtc = webRtcClient ?: return
         rtc.createPeerConnection()
@@ -366,9 +388,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         remoteCandidates = 0
         reconnectAttempts = 0
         saveRecentRoom(cleanId)
+        _isRemoteCameraEnabled.value = true
+        _isRemoteMicEnabled.value = true
 
         initWebRtc()
         audioManager.start()
+        CallForegroundService.startService(getApplication(), "Room $cleanId", cleanId)
 
         val rtc = webRtcClient ?: return
         rtc.createPeerConnection()
@@ -417,6 +442,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             is SignalingEvent.PeerDisconnected -> {
                 _callState.value = CallState.Ended(event.reason)
                 stopDurationTimer()
+            }
+            is SignalingEvent.PeerMediaStateChanged -> {
+                _isRemoteCameraEnabled.value = event.isCameraEnabled
+                _isRemoteMicEnabled.value = event.isMicEnabled
             }
             is SignalingEvent.ReconnectRequested -> {
                 Log.d(TAG, "Peer requested reconnection...")
@@ -533,6 +562,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 delay(1000)
                 _callDurationSeconds.value += 1
+                val totalSec = _callDurationSeconds.value
+                val min = totalSec / 60
+                val sec = totalSec % 60
+                val durationText = String.format("%02d:%02d", min, sec)
+                val pName = _peerDisplayName.value
+                val rId = _currentRoomId.value ?: ""
+                CallForegroundService.updateService(getApplication(), pName, rId, durationText)
             }
         }
     }
@@ -601,6 +637,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         webRtcClient?.let {
             val enabled = it.toggleMicrophone()
             _isMicEnabled.value = enabled
+            signalingClient.updateMediaState(
+                isCameraEnabled = _isCameraEnabled.value,
+                isMicEnabled = enabled
+            )
         }
     }
 
@@ -608,6 +648,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         webRtcClient?.let {
             val enabled = it.toggleCamera()
             _isCameraEnabled.value = enabled
+            signalingClient.updateMediaState(
+                isCameraEnabled = enabled,
+                isMicEnabled = _isMicEnabled.value
+            )
         }
     }
 
@@ -660,6 +704,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun endCall() {
+        // Stop active foreground notification
+        CallForegroundService.stopService(getApplication())
+        NotificationHelper.cancelIncomingCallNotification(getApplication())
+
         // Automatically finalize and save any active recording before closing WebRTC
         if (remoteRecorder?.isRecording == true) {
             remoteRecorder?.stopRecording()
@@ -718,6 +766,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        if (activeInstance == this) {
+            activeInstance = null
+        }
         endCall()
     }
 }

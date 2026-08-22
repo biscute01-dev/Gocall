@@ -11,6 +11,7 @@ data class FriendUser(
     val photoUrl: String? = null,
     val avatarBase64: String? = null,
     val localPhotoUri: String? = null,
+    val fcmToken: String? = null,
     val isOnline: Boolean = false,
     val lastSeen: Long = System.currentTimeMillis(),
     val addedAt: Long = System.currentTimeMillis()

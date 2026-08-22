@@ -26,11 +26,18 @@ data class RoomData(
     val createdAt: Long = System.currentTimeMillis()
 )
 
+@Keep
+data class MediaStateModel(
+    val cameraEnabled: Boolean = true,
+    val micEnabled: Boolean = true
+)
+
 sealed class SignalingEvent {
     data class OfferReceived(val sdp: String) : SignalingEvent()
     data class AnswerReceived(val sdp: String) : SignalingEvent()
     data class IceCandidateReceived(val candidate: IceCandidateModel, val isCallerCandidate: Boolean) : SignalingEvent()
     data class PeerDisconnected(val reason: String) : SignalingEvent()
     data class ReconnectRequested(val timestamp: Long) : SignalingEvent()
+    data class PeerMediaStateChanged(val isCameraEnabled: Boolean, val isMicEnabled: Boolean) : SignalingEvent()
     data class Error(val message: String) : SignalingEvent()
 }

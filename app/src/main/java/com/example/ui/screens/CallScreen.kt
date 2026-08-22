@@ -159,6 +159,8 @@ fun CallScreen(
     val peerAvatarBase64 by viewModel.peerAvatarBase64.collectAsState()
     val durationSeconds by viewModel.callDurationSeconds.collectAsState()
     val remoteVideoTrack by viewModel.remoteVideoTrack.collectAsState()
+    val isRemoteCameraEnabled by viewModel.isRemoteCameraEnabled.collectAsState()
+    val isRemoteMicEnabled by viewModel.isRemoteMicEnabled.collectAsState()
     val isMicEnabled by viewModel.isMicEnabled.collectAsState()
     val isCameraEnabled by viewModel.isCameraEnabled.collectAsState()
     val isFrontCamera by viewModel.isFrontCamera.collectAsState()
@@ -179,15 +181,30 @@ fun CallScreen(
         color = SlateDark950
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            // 1. Remote Video Background / Full View
-            if (rtcClient != null && remoteVideoTrack != null && callState is CallState.Connected) {
+            // 1. Remote Video Background or Profile Picture Overlay
+            val isRemoteVideoVisible = rtcClient != null &&
+                    remoteVideoTrack != null &&
+                    callState is CallState.Connected &&
+                    isRemoteCameraEnabled
+
+            if (isRemoteVideoVisible) {
                 RemoteVideoView(
                     webRtcClient = rtcClient,
                     videoTrack = remoteVideoTrack,
                     modifier = Modifier.fillMaxSize()
                 )
+            } else if (callState is CallState.Connected) {
+                // Remote camera is turned off: Display profile picture fitting whole screen with 75% dark overlay
+                RemoteCameraOffOverlay(
+                    peerDisplayName = peerDisplayName,
+                    peerUsername = peerUsername,
+                    peerPhotoUrl = peerPhotoUrl,
+                    peerAvatarBase64 = peerAvatarBase64,
+                    isRemoteMicEnabled = isRemoteMicEnabled,
+                    roomId = (callState as CallState.Connected).roomId
+                )
             } else {
-                // Background Fallback View (Waiting, Reconnecting, or Audio-Only)
+                // Background Fallback View (Waiting, Joining, Reconnecting)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -252,10 +269,6 @@ fun CallScreen(
                                 state = state,
                                 onForceReconnect = { viewModel.forceIceRestart() }
                             )
-                        }
-                        is CallState.Connected -> {
-                            // Connected but remote video is off / audio only
-                            AudioOnlyPeerOverlay(roomId = state.roomId)
                         }
                         else -> {
                             CircularProgressIndicator(color = IndigoLight)
@@ -1459,6 +1472,263 @@ private fun ReconnectingOverlay(
             ) {
                 Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = SlateDark950, modifier = Modifier.size(16.dp))
                 Text("Force Reconnect", fontWeight = FontWeight.Bold, color = SlateDark950)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteCameraOffOverlay(
+    peerDisplayName: String,
+    peerUsername: String,
+    peerPhotoUrl: String?,
+    peerAvatarBase64: String?,
+    isRemoteMicEnabled: Boolean,
+    roomId: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val decodedBitmap = remember(peerAvatarBase64) {
+        if (!peerAvatarBase64.isNullOrBlank()) {
+            try {
+                val bytes = Base64.decode(peerAvatarBase64, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "camera_off_pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 0.65f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_alpha"
+    )
+
+    Box(
+        modifier = modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        // 1. Participant profile picture FIT THE WHOLE SCREEN
+        when {
+            decodedBitmap != null -> {
+                Image(
+                    bitmap = decodedBitmap.asImageBitmap(),
+                    contentDescription = "Participant profile background",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            !peerPhotoUrl.isNullOrBlank() -> {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(peerPhotoUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "Participant profile background",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            else -> {
+                // Default gradient background with stylized initials backdrop
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    SlateDark800,
+                                    SlateDark900,
+                                    Color(0xFF030712)
+                                )
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val initial = peerDisplayName.firstOrNull()?.uppercaseChar()
+                        ?: peerUsername.firstOrNull()?.uppercaseChar()
+                        ?: roomId.firstOrNull()?.uppercaseChar()
+                        ?: 'U'
+                    Text(
+                        text = initial.toString(),
+                        fontSize = 180.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color.White.copy(alpha = 0.08f)
+                    )
+                }
+            }
+        }
+
+        // 2. Exact 75% Dark Overlay on top of fullscreen profile picture
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.75f))
+        )
+
+        // 3. Central participant info and camera-off indicator
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.padding(horizontal = 24.dp)
+        ) {
+            // Central Avatar Container with soft glowing ring
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(130.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(130.dp)
+                        .clip(CircleShape)
+                        .background(CyanGlow.copy(alpha = pulseAlpha * 0.4f))
+                )
+
+                Box(
+                    modifier = Modifier
+                        .size(100.dp)
+                        .clip(CircleShape)
+                        .border(2.5.dp, CyanGlow, CircleShape)
+                        .background(SlateDark800),
+                    contentAlignment = Alignment.Center
+                ) {
+                    when {
+                        decodedBitmap != null -> {
+                            Image(
+                                bitmap = decodedBitmap.asImageBitmap(),
+                                contentDescription = "Participant avatar",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        !peerPhotoUrl.isNullOrBlank() -> {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(peerPhotoUrl)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = "Participant avatar",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        else -> {
+                            val initial = peerDisplayName.firstOrNull()?.uppercaseChar()
+                                ?: peerUsername.firstOrNull()?.uppercaseChar()
+                                ?: '?'
+                            Text(
+                                text = initial.toString(),
+                                color = Color.White,
+                                fontSize = 38.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                // Camera Off small badge badge on bottom right of avatar
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(SlateDark950)
+                        .border(1.5.dp, AmberWarning, CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VideocamOff,
+                        contentDescription = "Camera Off",
+                        tint = AmberWarning,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            // Names
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                val displayName = peerDisplayName.ifBlank {
+                    if (peerUsername.isNotBlank()) "@$peerUsername" else "Room $roomId"
+                }
+                Text(
+                    text = displayName,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SlateTextPrimary,
+                    textAlign = TextAlign.Center
+                )
+                if (peerUsername.isNotBlank() && peerDisplayName.isNotBlank()) {
+                    Text(
+                        text = "@$peerUsername",
+                        fontSize = 14.sp,
+                        color = CyanAccent,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
+            // Status chip: Camera turned off + Mic indicator
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = SlateDark800.copy(alpha = 0.85f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.VideocamOff,
+                        contentDescription = null,
+                        tint = AmberWarning,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "Camera is turned off",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = SlateTextSecondary
+                    )
+                    if (!isRemoteMicEnabled) {
+                        Text("•", color = SlateTextMuted, fontSize = 12.sp)
+                        Icon(
+                            imageVector = Icons.Default.MicOff,
+                            contentDescription = "Muted",
+                            tint = RoseGlow,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "Muted",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = RoseGlow
+                        )
+                    } else {
+                        Text("•", color = SlateTextMuted, fontSize = 12.sp)
+                        Icon(
+                            imageVector = Icons.Default.Mic,
+                            contentDescription = "Mic Active",
+                            tint = EmeraldConnected,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "Audio Active",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = EmeraldConnected
+                        )
+                    }
+                }
             }
         }
     }

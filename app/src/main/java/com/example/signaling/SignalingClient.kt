@@ -215,6 +215,19 @@ class SignalingClient(
         }
     }
 
+    fun updateMediaState(isCameraEnabled: Boolean, isMicEnabled: Boolean) {
+        val roomId = currentRoomId ?: return
+        val targetPath = if (isCaller) "callerMedia" else "calleeMedia"
+        val stateMap = mapOf(
+            "cameraEnabled" to isCameraEnabled,
+            "micEnabled" to isMicEnabled
+        )
+        roomRef?.child(targetPath)?.setValue(stateMap)
+        scope.launch {
+            postRestData("rooms/$roomId/$targetPath", JSONObject(stateMap).toString())
+        }
+    }
+
     private fun listenForCalleeAnswer(ref: DatabaseReference) {
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
@@ -307,6 +320,17 @@ class SignalingClient(
                         scope.launch {
                             _events.emit(SignalingEvent.ReconnectRequested(System.currentTimeMillis()))
                         }
+                    }
+                }
+
+                // Check peer media state (camera on/off, mic on/off)
+                val peerMediaPath = if (isCaller) "calleeMedia" else "callerMedia"
+                val peerMediaSnap = snapshot.child(peerMediaPath)
+                if (peerMediaSnap.exists()) {
+                    val cameraEnabled = peerMediaSnap.child("cameraEnabled").getValue(Boolean::class.java) ?: true
+                    val micEnabled = peerMediaSnap.child("micEnabled").getValue(Boolean::class.java) ?: true
+                    scope.launch {
+                        _events.emit(SignalingEvent.PeerMediaStateChanged(isCameraEnabled = cameraEnabled, isMicEnabled = micEnabled))
                     }
                 }
             }

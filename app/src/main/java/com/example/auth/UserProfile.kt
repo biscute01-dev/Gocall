@@ -11,6 +11,7 @@ data class UserProfile(
     val photoUrl: String? = null,
     val avatarBase64: String? = null,
     val localPhotoUri: String? = null,
+    val fcmToken: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

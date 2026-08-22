@@ -18,6 +18,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.UserProfileChangeRequest
+import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
@@ -102,6 +103,7 @@ class AuthRepository(
                     if (profile != null && profile.username.isNotBlank()) {
                         _currentUserProfile.value = profile
                         _authState.value = AuthUiState.Authenticated(profile)
+                        syncFcmToken(user.uid)
                     } else {
                         // User exists in Auth but hasn't finalized their unique username
                         _currentUserProfile.value = null
@@ -364,6 +366,21 @@ class AuthRepository(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to process avatar uri: ${e.message}", e)
             ProcessedAvatar(base64 = null, localPath = null)
+        }
+    }
+
+    private fun syncFcmToken(uid: String) {
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val token = task.result
+                    if (!token.isNullOrBlank()) {
+                        database.getReference(NODE_USERS).child(uid).child("fcmToken").setValue(token)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to retrieve FCM token: ${e.message}")
         }
     }
 }
