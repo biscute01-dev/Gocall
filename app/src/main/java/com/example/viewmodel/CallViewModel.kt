@@ -6,6 +6,10 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AppAudioManager
+import com.example.auth.CallInvitation
+import com.example.auth.FriendUser
+import com.example.auth.FriendsRepository
+import com.example.auth.UserProfile
 import com.example.signaling.IceCandidateModel
 import com.example.signaling.SignalingClient
 import com.example.signaling.SignalingEvent
@@ -67,6 +71,28 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     val audioManager: AppAudioManager = AppAudioManager(application)
+
+    val friendsRepository: FriendsRepository = FriendsRepository(application, prefs.getString(KEY_CUSTOM_RTDB, null))
+
+    private val _peerUid = MutableStateFlow("")
+    val peerUid: StateFlow<String> = _peerUid.asStateFlow()
+
+    private val _peerDisplayName = MutableStateFlow("")
+    val peerDisplayName: StateFlow<String> = _peerDisplayName.asStateFlow()
+
+    private val _peerUsername = MutableStateFlow("")
+    val peerUsername: StateFlow<String> = _peerUsername.asStateFlow()
+
+    private val _peerPhotoUrl = MutableStateFlow<String?>(null)
+    val peerPhotoUrl: StateFlow<String?> = _peerPhotoUrl.asStateFlow()
+
+    private val _peerAvatarBase64 = MutableStateFlow<String?>(null)
+    val peerAvatarBase64: StateFlow<String?> = _peerAvatarBase64.asStateFlow()
+
+    private val _isOutgoingRinging = MutableStateFlow(false)
+    val isOutgoingRinging: StateFlow<Boolean> = _isOutgoingRinging.asStateFlow()
+
+    private var activeCallInvitation: CallInvitation? = null
 
     private val _callState = MutableStateFlow<CallState>(CallState.Idle)
     val callState: StateFlow<CallState> = _callState.asStateFlow()
@@ -192,6 +218,114 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         val prefixes = listOf("call", "room", "meet", "talk", "live")
         val randomNum = Random.nextInt(1000, 9999)
         return "${prefixes.random()}-$randomNum"
+    }
+
+    fun startDirectCall(friend: FriendUser, myProfile: UserProfile) {
+        val safeMyUid = myProfile.uid.replace(Regex("[^a-zA-Z0-9]"), "").take(6)
+        val safeFriendUid = friend.uid.replace(Regex("[^a-zA-Z0-9]"), "").take(6)
+        val callId = "call_${safeMyUid}_${safeFriendUid}_${System.currentTimeMillis()}"
+
+        _peerUid.value = friend.uid
+        _peerDisplayName.value = friend.displayName
+        _peerUsername.value = friend.username
+        _peerPhotoUrl.value = friend.photoUrl
+        _peerAvatarBase64.value = friend.avatarBase64
+        _isOutgoingRinging.value = true
+
+        val invitation = CallInvitation(
+            callId = callId,
+            callerUid = myProfile.uid,
+            callerDisplayName = myProfile.displayName,
+            callerUsername = myProfile.username,
+            callerPhotoUrl = myProfile.photoUrl,
+            callerAvatarBase64 = myProfile.avatarBase64,
+            calleeUid = friend.uid,
+            calleeDisplayName = friend.displayName,
+            calleeUsername = friend.username,
+            calleePhotoUrl = friend.photoUrl,
+            calleeAvatarBase64 = friend.avatarBase64,
+            status = "ringing",
+            timestamp = System.currentTimeMillis()
+        )
+        activeCallInvitation = invitation
+
+        _currentRoomId.value = callId
+        _isCaller.value = true
+        _callState.value = CallState.WaitingForPeer(callId)
+        localCandidates = 0
+        remoteCandidates = 0
+        reconnectAttempts = 0
+
+        initWebRtc()
+        audioManager.start()
+
+        val rtc = webRtcClient ?: return
+        rtc.createPeerConnection()
+
+        rtc.createOffer(
+            onSdpCreated = { sessionDescription ->
+                Log.d(TAG, "Created Offer SDP for direct call $callId")
+                signalingClient.createRoom(callId, sessionDescription.description)
+                viewModelScope.launch {
+                    friendsRepository.sendCallInvitation(invitation)
+                }
+            }
+        )
+    }
+
+    fun acceptIncomingCall(invitation: CallInvitation) {
+        activeCallInvitation = invitation
+        _peerUid.value = invitation.callerUid
+        _peerDisplayName.value = invitation.callerDisplayName
+        _peerUsername.value = invitation.callerUsername
+        _peerPhotoUrl.value = invitation.callerPhotoUrl
+        _peerAvatarBase64.value = invitation.callerAvatarBase64
+        _isOutgoingRinging.value = false
+
+        val callId = invitation.callId
+        _currentRoomId.value = callId
+        _isCaller.value = false
+        _callState.value = CallState.JoiningCall(callId)
+        localCandidates = 0
+        remoteCandidates = 0
+        reconnectAttempts = 0
+
+        initWebRtc()
+        audioManager.start()
+
+        val rtc = webRtcClient ?: return
+        rtc.createPeerConnection()
+
+        signalingClient.joinRoom(callId) { offerSdp ->
+            Log.d(TAG, "Received offer SDP for direct call $callId, sending answer")
+            rtc.setRemoteDescription(offerSdp, SessionDescription.Type.OFFER) {
+                rtc.createAnswer { answerDesc ->
+                    signalingClient.sendAnswer(answerDesc.description)
+                    viewModelScope.launch {
+                        friendsRepository.clearIncomingCall(invitation.calleeUid)
+                    }
+                }
+            }
+        }
+    }
+
+    fun rejectIncomingCall(invitation: CallInvitation) {
+        viewModelScope.launch {
+            friendsRepository.rejectCall(invitation)
+        }
+        if (_currentRoomId.value == invitation.callId) {
+            endCall()
+        }
+    }
+
+    fun cancelOutgoingDirectCall() {
+        val invitation = activeCallInvitation
+        if (invitation != null) {
+            viewModelScope.launch {
+                friendsRepository.cancelOutgoingCall(invitation.callId, invitation.calleeUid)
+            }
+        }
+        endCall()
     }
 
     fun createRoom(roomId: String = generateRandomRoomId()) {
@@ -545,6 +679,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _callDurationSeconds.value = 0
         _remoteVideoTrack.value = null
         _liveStats.value = WebRtcLiveStats()
+        _isOutgoingRinging.value = false
+        activeCallInvitation = null
     }
 
     fun resetToIdle() {
@@ -552,6 +688,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _currentRoomId.value = null
         _callDurationSeconds.value = 0
         _remoteVideoTrack.value = null
+        _isOutgoingRinging.value = false
+        _peerUid.value = ""
+        _peerDisplayName.value = ""
+        _peerUsername.value = ""
+        _peerPhotoUrl.value = null
+        _peerAvatarBase64.value = null
+        activeCallInvitation = null
     }
 
     private fun loadRecentRooms(): List<String> {

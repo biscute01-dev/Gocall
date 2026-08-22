@@ -287,13 +287,26 @@ class SignalingClient(
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val status = snapshot.child("status").getValue(String::class.java)
-                if (status == "ended") {
-                    scope.launch {
-                        _events.emit(SignalingEvent.PeerDisconnected("Call ended by peer"))
+                when (status) {
+                    "ended" -> {
+                        scope.launch {
+                            _events.emit(SignalingEvent.PeerDisconnected("Call ended by peer"))
+                        }
                     }
-                } else if (status == "reconnecting") {
-                    scope.launch {
-                        _events.emit(SignalingEvent.ReconnectRequested(System.currentTimeMillis()))
+                    "rejected" -> {
+                        scope.launch {
+                            _events.emit(SignalingEvent.PeerDisconnected("Call declined"))
+                        }
+                    }
+                    "cancelled" -> {
+                        scope.launch {
+                            _events.emit(SignalingEvent.PeerDisconnected("Call was cancelled"))
+                        }
+                    }
+                    "reconnecting" -> {
+                        scope.launch {
+                            _events.emit(SignalingEvent.ReconnectRequested(System.currentTimeMillis()))
+                        }
                     }
                 }
             }

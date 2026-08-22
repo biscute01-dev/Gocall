@@ -46,8 +46,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.auth.AuthUiState
+import com.example.auth.FriendsViewModel
 import com.example.ui.screens.CallScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.IncomingCallScreen
 import com.example.ui.screens.LoginScreen
 import com.example.ui.screens.ProfileSetupScreen
 import com.example.ui.theme.CyanGlow
@@ -63,6 +65,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val callViewModel: CallViewModel by viewModels()
     private val authViewModel: AuthViewModel by viewModels()
+    private val friendsViewModel: FriendsViewModel by viewModels()
 
     companion object {
         const val ACTION_PIP_END_CALL = "com.example.action.PIP_END_CALL"
@@ -124,6 +127,7 @@ class MainActivity : ComponentActivity() {
                     MainApp(
                         viewModel = callViewModel,
                         authViewModel = authViewModel,
+                        friendsViewModel = friendsViewModel,
                         onEnterPip = { enterPipMode() }
                     )
                 }
@@ -254,13 +258,21 @@ class MainActivity : ComponentActivity() {
 fun MainApp(
     viewModel: CallViewModel,
     authViewModel: AuthViewModel,
+    friendsViewModel: FriendsViewModel,
     onEnterPip: () -> Unit = {}
 ) {
     val authState by authViewModel.authState.collectAsState()
     val callState by viewModel.callState.collectAsState()
+    val incomingCallInvitation by viewModel.friendsRepository.incomingCall.collectAsState()
+
     var isEditingProfile by remember { mutableStateOf(false) }
     var showEndCallConfirmDialog by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val isInCall = callState !is CallState.Idle && callState !is CallState.Ended
+    val hasActiveIncomingCall = incomingCallInvitation != null &&
+            incomingCallInvitation?.status == "ringing" &&
+            !isInCall
 
     LaunchedEffect(callState) {
         when (val state = callState) {
@@ -275,14 +287,18 @@ fun MainApp(
         }
     }
 
-    val isInCall = callState !is CallState.Idle && callState !is CallState.Ended
-
-    // Intercept back press when on active call or editing profile
-    BackHandler(enabled = isInCall || isEditingProfile) {
-        if (isInCall) {
-            showEndCallConfirmDialog = true
-        } else if (isEditingProfile) {
-            isEditingProfile = false
+    // Intercept back press when on active call, incoming call, or editing profile
+    BackHandler(enabled = isInCall || isEditingProfile || hasActiveIncomingCall) {
+        when {
+            hasActiveIncomingCall -> {
+                incomingCallInvitation?.let { viewModel.rejectIncomingCall(it) }
+            }
+            isInCall -> {
+                showEndCallConfirmDialog = true
+            }
+            isEditingProfile -> {
+                isEditingProfile = false
+            }
         }
     }
 
@@ -322,6 +338,13 @@ fun MainApp(
                 )
             }
             is AuthUiState.Authenticated -> {
+                // Sync profile to call signaling and friends repo
+                LaunchedEffect(currentAuthState.profile) {
+                    viewModel.friendsRepository.setupPresence(currentAuthState.profile.uid)
+                    viewModel.friendsRepository.startListeningForIncomingCalls(currentAuthState.profile.uid)
+                    friendsViewModel.setUserProfile(currentAuthState.profile)
+                }
+
                 if (isEditingProfile) {
                     ProfileSetupScreen(
                         authViewModel = authViewModel,
@@ -331,6 +354,17 @@ fun MainApp(
                         existingProfile = currentAuthState.profile,
                         onProfileCompleted = {
                             isEditingProfile = false
+                        }
+                    )
+                } else if (hasActiveIncomingCall && incomingCallInvitation != null) {
+                    // Full-screen Messenger style incoming call screen
+                    IncomingCallScreen(
+                        invitation = incomingCallInvitation!!,
+                        onAccept = {
+                            viewModel.acceptIncomingCall(incomingCallInvitation!!)
+                        },
+                        onDecline = {
+                            viewModel.rejectIncomingCall(incomingCallInvitation!!)
                         }
                     )
                 } else {
@@ -353,7 +387,11 @@ fun MainApp(
                             HomeScreen(
                                 viewModel = viewModel,
                                 authViewModel = authViewModel,
+                                friendsViewModel = friendsViewModel,
                                 onOpenProfileEdit = { isEditingProfile = true },
+                                onDirectCallFriend = { friend ->
+                                    // Direct call started inside HomeScreen via viewModel.startDirectCall
+                                },
                                 onCreateCall = { roomId ->
                                     viewModel.createRoom(roomId)
                                 },

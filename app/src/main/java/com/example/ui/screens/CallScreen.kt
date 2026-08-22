@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
+import android.util.Base64
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -14,6 +16,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -90,7 +93,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -98,6 +103,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -146,6 +153,10 @@ fun CallScreen(
 
     val callState by viewModel.callState.collectAsState()
     val roomId by viewModel.currentRoomId.collectAsState()
+    val peerDisplayName by viewModel.peerDisplayName.collectAsState()
+    val peerUsername by viewModel.peerUsername.collectAsState()
+    val peerPhotoUrl by viewModel.peerPhotoUrl.collectAsState()
+    val peerAvatarBase64 by viewModel.peerAvatarBase64.collectAsState()
     val durationSeconds by viewModel.callDurationSeconds.collectAsState()
     val remoteVideoTrack by viewModel.remoteVideoTrack.collectAsState()
     val isMicEnabled by viewModel.isMicEnabled.collectAsState()
@@ -195,6 +206,14 @@ fun CallScreen(
                         is CallState.WaitingForPeer -> {
                             WaitingForPeerOverlay(
                                 roomId = state.roomId,
+                                peerDisplayName = peerDisplayName,
+                                peerUsername = peerUsername,
+                                peerPhotoUrl = peerPhotoUrl,
+                                peerAvatarBase64 = peerAvatarBase64,
+                                onCancelCall = {
+                                    viewModel.cancelOutgoingDirectCall()
+                                    onEndCall()
+                                },
                                 onShare = {
                                     val sendIntent = Intent().apply {
                                         action = Intent.ACTION_SEND
@@ -327,27 +346,31 @@ fun CallScreen(
                                 )
                         )
                         Text(
-                            text = roomId ?: "",
+                            text = if (peerDisplayName.isNotBlank()) peerDisplayName else (roomId ?: ""),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace,
-                            color = SlateTextPrimary
+                            fontFamily = if (peerDisplayName.isNotBlank()) FontFamily.Default else FontFamily.Monospace,
+                            color = SlateTextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        IconButton(
-                            onClick = {
-                                roomId?.let {
-                                    clipboardManager.setText(AnnotatedString(it))
-                                    Toast.makeText(context, "Room ID copied", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            modifier = Modifier.size(20.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "Copy room ID",
-                                tint = CyanGlow,
-                                modifier = Modifier.size(14.dp)
-                            )
+                        if (peerDisplayName.isBlank()) {
+                            IconButton(
+                                onClick = {
+                                    roomId?.let {
+                                        clipboardManager.setText(AnnotatedString(it))
+                                        Toast.makeText(context, "Room ID copied", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.size(20.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy room ID",
+                                    tint = CyanGlow,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
 
                         if (callState is CallState.Connected) {
@@ -1180,9 +1203,15 @@ private fun StatRow(label: String, value: String) {
 @Composable
 private fun WaitingForPeerOverlay(
     roomId: String,
+    peerDisplayName: String = "",
+    peerUsername: String = "",
+    peerPhotoUrl: String? = null,
+    peerAvatarBase64: String? = null,
+    onCancelCall: () -> Unit = {},
     onShare: () -> Unit,
     onCopy: () -> Unit
 ) {
+    val context = LocalContext.current
     val infiniteTransition = rememberInfiniteTransition(label = "pulse_radar")
     val radarScale by infiniteTransition.animateFloat(
         initialValue = 0.9f,
@@ -1203,93 +1232,174 @@ private fun WaitingForPeerOverlay(
         label = "alpha"
     )
 
+    val decodedBitmap = remember(peerAvatarBase64) {
+        if (!peerAvatarBase64.isNullOrBlank()) {
+            try {
+                val bytes = Base64.decode(peerAvatarBase64, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+    }
+
+    val isCallingFriend = peerDisplayName.isNotBlank() || peerUsername.isNotBlank()
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(20.dp),
         modifier = Modifier.padding(horizontal = 32.dp)
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(130.dp)) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(140.dp)) {
             // Radar pulse ring
             Box(
                 modifier = Modifier
-                    .size(120.dp)
+                    .size(130.dp)
                     .scale(radarScale)
                     .clip(CircleShape)
                     .background(CyanGlow.copy(alpha = radarAlpha))
             )
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(80.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(listOf(IndigoAccent, CyanAccent))
+
+            if (isCallingFriend) {
+                Box(
+                    modifier = Modifier
+                        .size(86.dp)
+                        .clip(CircleShape)
+                        .border(2.dp, CyanGlow, CircleShape)
+                        .background(SlateDark800),
+                    contentAlignment = Alignment.Center
+                ) {
+                    when {
+                        decodedBitmap != null -> {
+                            Image(
+                                bitmap = decodedBitmap.asImageBitmap(),
+                                contentDescription = "Friend avatar",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        !peerPhotoUrl.isNullOrBlank() -> {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(peerPhotoUrl)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = "Friend photo",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        else -> {
+                            val initial = peerDisplayName.firstOrNull()?.uppercaseChar()
+                                ?: peerUsername.firstOrNull()?.uppercaseChar()
+                                ?: '?'
+                            Text(
+                                text = initial.toString(),
+                                color = Color.White,
+                                fontSize = 32.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            } else {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(80.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.linearGradient(listOf(IndigoAccent, CyanAccent))
+                        )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(40.dp)
                     )
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Videocam,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(40.dp)
-                )
+                }
             }
         }
 
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                text = "Waiting for peer to join...",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = SlateTextPrimary
-            )
-            Text(
-                text = "Share the room code below with the person you want to call",
-                fontSize = 13.sp,
-                color = SlateTextSecondary,
-                textAlign = TextAlign.Center
-            )
-        }
-
-        // Room Code Card
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = SlateDark800),
-            border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder),
-            modifier = Modifier.clickable { onCopy() }
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+        if (isCallingFriend) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = roomId,
+                    text = "Calling ${peerDisplayName.ifBlank { "@$peerUsername" }}...",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                    color = CyanGlow
+                    color = SlateTextPrimary,
+                    textAlign = TextAlign.Center
                 )
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy code",
-                    tint = SlateTextSecondary,
-                    modifier = Modifier.size(18.dp)
+                if (peerUsername.isNotBlank()) {
+                    Text(
+                        text = "@$peerUsername • Ringing...",
+                        fontSize = 14.sp,
+                        color = CyanAccent,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Waiting for peer to join...",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SlateTextPrimary
+                )
+                Text(
+                    text = "Share the room code below with the person you want to call",
+                    fontSize = 13.sp,
+                    color = SlateTextSecondary,
+                    textAlign = TextAlign.Center
                 )
             }
-        }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                onClick = onShare,
-                colors = ButtonDefaults.buttonColors(containerColor = IndigoAccent),
-                shape = RoundedCornerShape(12.dp)
+            // Room Code Card
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SlateDark800),
+                border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder),
+                modifier = Modifier.clickable { onCopy() }
             ) {
                 Row(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Icon(imageVector = Icons.Default.Share, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                    Text("Share Code", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(
+                        text = roomId,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = CyanGlow
+                    )
+                    Icon(
+                        imageVector = Icons.Default.ContentCopy,
+                        contentDescription = "Copy code",
+                        tint = SlateTextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onShare,
+                    colors = ButtonDefaults.buttonColors(containerColor = IndigoAccent),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Text("Share Code", fontWeight = FontWeight.Bold, color = Color.White)
+                    }
                 }
             }
         }
