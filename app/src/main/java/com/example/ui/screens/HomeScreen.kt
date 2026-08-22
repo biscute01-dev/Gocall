@@ -89,7 +89,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.auth.UserProfile
+import com.example.ui.components.ProfileDialog
 import com.example.ui.components.StatusPill
+import com.example.ui.components.UserAvatar
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.CyanGlow
 import com.example.ui.theme.EmeraldConnected
@@ -106,12 +109,15 @@ import com.example.ui.theme.SlateDark950
 import com.example.ui.theme.SlateTextMuted
 import com.example.ui.theme.SlateTextPrimary
 import com.example.ui.theme.SlateTextSecondary
+import com.example.viewmodel.AuthViewModel
 import com.example.viewmodel.CallViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(
     viewModel: CallViewModel,
+    authViewModel: AuthViewModel? = null,
+    onOpenProfileEdit: () -> Unit = {},
     onCreateCall: (roomId: String) -> Unit,
     onJoinCall: (roomId: String) -> Unit,
     modifier: Modifier = Modifier
@@ -123,9 +129,11 @@ fun HomeScreen(
     var newRoomId by remember { mutableStateOf(viewModel.generateRandomRoomId()) }
     var joinRoomIdInput by remember { mutableStateOf("") }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showProfileDialog by remember { mutableStateOf(false) }
     var showPermissionDialog by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
+    val userProfile by (authViewModel?.currentUserProfile?.collectAsState() ?: remember { mutableStateOf(null) })
     val recentRooms by viewModel.recentRooms.collectAsState()
     val customDatabaseUrl by viewModel.customDatabaseUrl.collectAsState()
 
@@ -183,7 +191,7 @@ fun HomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                // Header Bar
+                // Header Bar with User Profile & Settings
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
@@ -193,56 +201,97 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Box(
-                                contentAlignment = Alignment.Center,
+                        // User Profile Pill (Avatar + Greeting + @username) or App Logo
+                        if (userProfile != null) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier
-                                    .size(42.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        Brush.linearGradient(
-                                            listOf(IndigoAccent, CyanAccent)
-                                        )
-                                    )
+                                    .clip(RoundedCornerShape(32.dp))
+                                    .background(GlassDarkCard)
+                                    .border(1.dp, GlassDarkBorder, RoundedCornerShape(32.dp))
+                                    .clickable { showProfileDialog = true }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("user_profile_header_pill")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Videocam,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
+                                UserAvatar(
+                                    userProfile = userProfile,
+                                    size = 38.dp,
+                                    borderWidth = 1.5.dp,
+                                    borderColor = CyanGlow
                                 )
+                                Column {
+                                    Text(
+                                        text = userProfile?.displayName?.ifBlank { "User" } ?: "User",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = SlateTextPrimary
+                                    )
+                                    Text(
+                                        text = "@${userProfile?.username ?: ""}",
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = CyanGlow
+                                    )
+                                }
                             }
-                            Column {
-                                Text(
-                                    text = "1-on-1 Video Call",
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = SlateTextPrimary
-                                )
-                                Text(
-                                    text = "WebRTC • Google STUN",
-                                    fontSize = 12.sp,
-                                    color = CyanGlow
-                                )
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(IndigoAccent, CyanAccent)
+                                            )
+                                        )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Videocam,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                Column {
+                                    Text(
+                                        text = "1-on-1 Video Call",
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = SlateTextPrimary
+                                    )
+                                    Text(
+                                        text = "WebRTC • Google STUN",
+                                        fontSize = 12.sp,
+                                        color = CyanGlow
+                                    )
+                                }
                             }
                         }
 
-                        IconButton(
-                            onClick = { showSettingsDialog = true },
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(SlateDark800.copy(alpha = 0.6f))
-                                .border(1.dp, GlassDarkBorder, CircleShape)
-                                .testTag("settings_button")
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Settings,
-                                contentDescription = "Settings",
-                                tint = SlateTextSecondary
-                            )
+                            IconButton(
+                                onClick = { showSettingsDialog = true },
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(SlateDark800.copy(alpha = 0.6f))
+                                    .border(1.dp, GlassDarkBorder, CircleShape)
+                                    .testTag("settings_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Settings",
+                                    tint = SlateTextSecondary
+                                )
+                            }
                         }
                     }
                 }
@@ -746,6 +795,22 @@ fun HomeScreen(
             },
             containerColor = SlateDark900,
             shape = RoundedCornerShape(20.dp)
+        )
+    }
+
+    // Profile Details & Management Dialog
+    if (showProfileDialog && userProfile != null) {
+        ProfileDialog(
+            userProfile = userProfile!!,
+            onDismiss = { showProfileDialog = false },
+            onEditProfile = {
+                showProfileDialog = false
+                onOpenProfileEdit()
+            },
+            onSignOut = {
+                showProfileDialog = false
+                authViewModel?.signOut()
+            }
         )
     }
 }

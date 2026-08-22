@@ -21,10 +21,14 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -35,15 +39,22 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.example.auth.AuthUiState
 import com.example.ui.screens.CallScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.LoginScreen
+import com.example.ui.screens.ProfileSetupScreen
+import com.example.ui.theme.CyanGlow
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.RoseDestructive
 import com.example.ui.theme.SlateDark950
+import com.example.viewmodel.AuthViewModel
 import com.example.viewmodel.CallState
 import com.example.viewmodel.CallViewModel
 import kotlinx.coroutines.flow.combine
@@ -51,6 +62,7 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val callViewModel: CallViewModel by viewModels()
+    private val authViewModel: AuthViewModel by viewModels()
 
     companion object {
         const val ACTION_PIP_END_CALL = "com.example.action.PIP_END_CALL"
@@ -111,6 +123,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     MainApp(
                         viewModel = callViewModel,
+                        authViewModel = authViewModel,
                         onEnterPip = { enterPipMode() }
                     )
                 }
@@ -240,9 +253,12 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainApp(
     viewModel: CallViewModel,
+    authViewModel: AuthViewModel,
     onEnterPip: () -> Unit = {}
 ) {
+    val authState by authViewModel.authState.collectAsState()
     val callState by viewModel.callState.collectAsState()
+    var isEditingProfile by remember { mutableStateOf(false) }
     var showEndCallConfirmDialog by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
@@ -261,36 +277,94 @@ fun MainApp(
 
     val isInCall = callState !is CallState.Idle && callState !is CallState.Ended
 
-    // Intercept back press when on active call
-    BackHandler(enabled = isInCall) {
-        showEndCallConfirmDialog = true
+    // Intercept back press when on active call or editing profile
+    BackHandler(enabled = isInCall || isEditingProfile) {
+        if (isInCall) {
+            showEndCallConfirmDialog = true
+        } else if (isEditingProfile) {
+            isEditingProfile = false
+        }
     }
 
     AnimatedContent(
-        targetState = isInCall,
+        targetState = authState,
         transitionSpec = {
             fadeIn() togetherWith fadeOut()
         },
-        label = "call_navigation"
-    ) { inCall ->
-        if (inCall) {
-            CallScreen(
-                viewModel = viewModel,
-                onEndCall = {
-                    viewModel.endCall()
-                },
-                onEnterPip = onEnterPip
-            )
-        } else {
-            HomeScreen(
-                viewModel = viewModel,
-                onCreateCall = { roomId ->
-                    viewModel.createRoom(roomId)
-                },
-                onJoinCall = { roomId ->
-                    viewModel.joinRoom(roomId)
+        label = "auth_and_app_navigation"
+    ) { currentAuthState ->
+        when (currentAuthState) {
+            is AuthUiState.Loading -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(SlateDark950),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = CyanGlow,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(44.dp)
+                    )
                 }
-            )
+            }
+            is AuthUiState.Unauthenticated -> {
+                LoginScreen(authViewModel = authViewModel)
+            }
+            is AuthUiState.NeedsProfileSetup -> {
+                ProfileSetupScreen(
+                    authViewModel = authViewModel,
+                    suggestedDisplayName = currentAuthState.suggestedDisplayName,
+                    suggestedPhotoUrl = currentAuthState.suggestedPhotoUrl,
+                    onProfileCompleted = {
+                        // Successfully completed profile
+                    }
+                )
+            }
+            is AuthUiState.Authenticated -> {
+                if (isEditingProfile) {
+                    ProfileSetupScreen(
+                        authViewModel = authViewModel,
+                        suggestedDisplayName = currentAuthState.profile.displayName,
+                        suggestedPhotoUrl = currentAuthState.profile.photoUrl,
+                        isEditMode = true,
+                        existingProfile = currentAuthState.profile,
+                        onProfileCompleted = {
+                            isEditingProfile = false
+                        }
+                    )
+                } else {
+                    AnimatedContent(
+                        targetState = isInCall,
+                        transitionSpec = {
+                            fadeIn() togetherWith fadeOut()
+                        },
+                        label = "call_navigation"
+                    ) { inCall ->
+                        if (inCall) {
+                            CallScreen(
+                                viewModel = viewModel,
+                                onEndCall = {
+                                    viewModel.endCall()
+                                },
+                                onEnterPip = onEnterPip
+                            )
+                        } else {
+                            HomeScreen(
+                                viewModel = viewModel,
+                                authViewModel = authViewModel,
+                                onOpenProfileEdit = { isEditingProfile = true },
+                                onCreateCall = { roomId ->
+                                    viewModel.createRoom(roomId)
+                                },
+                                onJoinCall = { roomId ->
+                                    viewModel.joinRoom(roomId)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 
