@@ -35,6 +35,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,6 +57,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -91,10 +94,10 @@ private enum class DragHandle {
  * WhatsApp Profile Picture Square Cropper Dialog.
  *
  * Feature behavior:
- * - The image stays stationary in the center of the screen.
- * - The square cropping window can be moved by dragging inside it.
- * - The 4 white L-corners and 4 edge handles can be dragged to resize the square.
- * - All movements and resizes strictly stay bounded inside the image boundaries.
+ * - The image stays stationary in the center of the viewport.
+ * - The square cropping window can be dragged freely across the image.
+ * - The 4 white L-corners and 4 edge handles can be dragged to expand or shrink the square crop area.
+ * - All movements and resizes are strictly clamped inside the stationary image bounds.
  */
 @Composable
 fun SquareImageCropperDialog(
@@ -108,16 +111,15 @@ fun SquareImageCropperDialog(
     var sourceBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var isCropping by remember { mutableStateOf(false) }
-
     var rotationDegrees by remember { mutableIntStateOf(0) }
 
-    // Cropping box geometry state
-    var cropLeft by remember { mutableStateOf(0f) }
-    var cropTop by remember { mutableStateOf(0f) }
-    var cropSize by remember { mutableStateOf(0f) }
+    // Cropping box geometry state hoisted to dialog scope
+    var cropLeft by remember { mutableFloatStateOf(0f) }
+    var cropTop by remember { mutableFloatStateOf(0f) }
+    var cropSize by remember { mutableFloatStateOf(0f) }
     var activeImgRect by remember { mutableStateOf(Rect.Zero) }
 
-    // Load source bitmap safely
+    // Load source bitmap on IO dispatcher
     LaunchedEffect(sourceUri) {
         withContext(Dispatchers.IO) {
             try {
@@ -209,10 +211,10 @@ fun SquareImageCropperDialog(
                             Rect(imgLeft, imgTop, imgLeft + displayedImgWidth, imgTop + displayedImgHeight)
                         }
 
-                        // Reset or update crop box whenever image bounds change (e.g. on rotation or initial load)
+                        // Initialize or update crop rect on rotation/load
                         LaunchedEffect(imgRect) {
                             activeImgRect = imgRect
-                            val initialSize = min(imgRect.width, imgRect.height)
+                            val initialSize = min(imgRect.width, imgRect.height) * 0.85f
                             cropSize = initialSize
                             cropLeft = imgRect.left + (imgRect.width - initialSize) / 2f
                             cropTop = imgRect.top + (imgRect.height - initialSize) / 2f
@@ -220,39 +222,44 @@ fun SquareImageCropperDialog(
 
                         var activeHandle by remember { mutableStateOf(DragHandle.NONE) }
 
-                        val minCropSizePx = with(density) { 60.dp.toPx() }
-                        val touchRadiusPx = with(density) { 36.dp.toPx() }
+                        val minCropSizePx = with(density) { 50.dp.toPx() }
+                        val touchRadiusPx = with(density) { 42.dp.toPx() }
 
-                        // Canvas + Pointer Input for stationary image & draggable crop window
+                        // Canvas + Pointer Input for stationary image & draggable/resizable crop window
                         Canvas(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .pointerInput(imgRect, cropLeft, cropTop, cropSize) {
+                                .pointerInput(rotationDegrees, displayedImgWidth, displayedImgHeight) {
                                     detectDragGestures(
                                         onDragStart = { startOffset ->
                                             val currentRect = Rect(cropLeft, cropTop, cropLeft + cropSize, cropTop + cropSize)
 
-                                            // Check 4 Corners first (highest priority)
+                                            // 1. Check 4 Corners (Highest Priority)
                                             val distTopLeft = (startOffset - currentRect.topLeft).getDistance()
                                             val distTopRight = (startOffset - currentRect.topRight).getDistance()
                                             val distBottomLeft = (startOffset - currentRect.bottomLeft).getDistance()
                                             val distBottomRight = (startOffset - currentRect.bottomRight).getDistance()
 
-                                            // Check 4 Edges
-                                            val distTopEdge = abs(startOffset.y - currentRect.top)
-                                            val distBottomEdge = abs(startOffset.y - currentRect.bottom)
-                                            val distLeftEdge = abs(startOffset.x - currentRect.left)
-                                            val distRightEdge = abs(startOffset.x - currentRect.right)
+                                            // 2. Check 4 Mid Edges
+                                            val midTop = Offset(currentRect.left + currentRect.width / 2f, currentRect.top)
+                                            val midBottom = Offset(currentRect.left + currentRect.width / 2f, currentRect.bottom)
+                                            val midLeft = Offset(currentRect.left, currentRect.top + currentRect.height / 2f)
+                                            val midRight = Offset(currentRect.right, currentRect.top + currentRect.height / 2f)
+
+                                            val distTopEdge = (startOffset - midTop).getDistance()
+                                            val distBottomEdge = (startOffset - midBottom).getDistance()
+                                            val distLeftEdge = (startOffset - midLeft).getDistance()
+                                            val distRightEdge = (startOffset - midRight).getDistance()
 
                                             activeHandle = when {
                                                 distTopLeft <= touchRadiusPx -> DragHandle.TOP_LEFT
                                                 distTopRight <= touchRadiusPx -> DragHandle.TOP_RIGHT
                                                 distBottomLeft <= touchRadiusPx -> DragHandle.BOTTOM_LEFT
                                                 distBottomRight <= touchRadiusPx -> DragHandle.BOTTOM_RIGHT
-                                                distTopEdge <= touchRadiusPx && startOffset.x in currentRect.left..currentRect.right -> DragHandle.TOP_EDGE
-                                                distBottomEdge <= touchRadiusPx && startOffset.x in currentRect.left..currentRect.right -> DragHandle.BOTTOM_EDGE
-                                                distLeftEdge <= touchRadiusPx && startOffset.y in currentRect.top..currentRect.bottom -> DragHandle.LEFT_EDGE
-                                                distRightEdge <= touchRadiusPx && startOffset.y in currentRect.top..currentRect.bottom -> DragHandle.RIGHT_EDGE
+                                                distTopEdge <= touchRadiusPx -> DragHandle.TOP_EDGE
+                                                distBottomEdge <= touchRadiusPx -> DragHandle.BOTTOM_EDGE
+                                                distLeftEdge <= touchRadiusPx -> DragHandle.LEFT_EDGE
+                                                distRightEdge <= touchRadiusPx -> DragHandle.RIGHT_EDGE
                                                 currentRect.contains(startOffset) -> DragHandle.BODY
                                                 else -> DragHandle.NONE
                                             }
@@ -264,7 +271,7 @@ fun SquareImageCropperDialog(
 
                                             when (activeHandle) {
                                                 DragHandle.BODY -> {
-                                                    // Move the square within image boundaries
+                                                    // Move entire square crop box inside image bounds
                                                     val newLeft = (cropLeft + dragAmount.x).coerceIn(
                                                         imgRect.left,
                                                         imgRect.right - cropSize
@@ -325,7 +332,9 @@ fun SquareImageCropperDialog(
                                                     val anchorBottom = cropTop + cropSize
                                                     val centerX = cropLeft + cropSize / 2f
                                                     val delta = -dragAmount.y
-                                                    val maxAllowedSize = min(anchorBottom - imgRect.top, min(imgRect.right - centerX, centerX - imgRect.left) * 2f)
+                                                    val maxAllowedFromTop = anchorBottom - imgRect.top
+                                                    val maxAllowedFromWidth = min(centerX - imgRect.left, imgRect.right - centerX) * 2f
+                                                    val maxAllowedSize = min(maxAllowedFromTop, maxAllowedFromWidth)
                                                     val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
                                                     cropSize = newSize
                                                     cropTop = anchorBottom - newSize
@@ -336,7 +345,9 @@ fun SquareImageCropperDialog(
                                                     val anchorTop = cropTop
                                                     val centerX = cropLeft + cropSize / 2f
                                                     val delta = dragAmount.y
-                                                    val maxAllowedSize = min(imgRect.bottom - anchorTop, min(imgRect.right - centerX, centerX - imgRect.left) * 2f)
+                                                    val maxAllowedFromBottom = imgRect.bottom - anchorTop
+                                                    val maxAllowedFromWidth = min(centerX - imgRect.left, imgRect.right - centerX) * 2f
+                                                    val maxAllowedSize = min(maxAllowedFromBottom, maxAllowedFromWidth)
                                                     val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
                                                     cropSize = newSize
                                                     cropTop = anchorTop
@@ -347,7 +358,9 @@ fun SquareImageCropperDialog(
                                                     val anchorRight = cropLeft + cropSize
                                                     val centerY = cropTop + cropSize / 2f
                                                     val delta = -dragAmount.x
-                                                    val maxAllowedSize = min(anchorRight - imgRect.left, min(imgRect.bottom - centerY, centerY - imgRect.top) * 2f)
+                                                    val maxAllowedFromLeft = anchorRight - imgRect.left
+                                                    val maxAllowedFromHeight = min(centerY - imgRect.top, imgRect.bottom - centerY) * 2f
+                                                    val maxAllowedSize = min(maxAllowedFromLeft, maxAllowedFromHeight)
                                                     val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
                                                     cropSize = newSize
                                                     cropLeft = anchorRight - newSize
@@ -358,7 +371,9 @@ fun SquareImageCropperDialog(
                                                     val anchorLeft = cropLeft
                                                     val centerY = cropTop + cropSize / 2f
                                                     val delta = dragAmount.x
-                                                    val maxAllowedSize = min(imgRect.right - anchorLeft, min(imgRect.bottom - centerY, centerY - imgRect.top) * 2f)
+                                                    val maxAllowedFromRight = imgRect.right - anchorLeft
+                                                    val maxAllowedFromHeight = min(centerY - imgRect.top, imgRect.bottom - centerY) * 2f
+                                                    val maxAllowedSize = min(maxAllowedFromRight, maxAllowedFromHeight)
                                                     val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
                                                     cropSize = newSize
                                                     cropLeft = anchorLeft
@@ -376,8 +391,8 @@ fun SquareImageCropperDialog(
                             // 1. Draw Stationary Image inside imgRect
                             drawImage(
                                 image = bmp.asImageBitmap(),
-                                dstOffset = androidx.compose.ui.unit.IntOffset(imgRect.left.toInt(), imgRect.top.toInt()),
-                                dstSize = androidx.compose.ui.unit.IntSize(imgRect.width.toInt(), imgRect.height.toInt())
+                                dstOffset = IntOffset(imgRect.left.toInt(), imgRect.top.toInt()),
+                                dstSize = IntSize(imgRect.width.toInt(), imgRect.height.toInt())
                             )
 
                             // 2. Dark Scrim over everything outside the crop window
