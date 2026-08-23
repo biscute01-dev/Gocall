@@ -9,14 +9,13 @@ import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,7 +35,6 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,9 +51,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -69,18 +65,36 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-// WhatsApp Theme Colors
+// WhatsApp Dark Theme Colors
 private val WhatsAppBg = Color(0xFF0B141A)
 private val WhatsAppGreen = Color(0xFF00A884)
 private val WhatsAppDarkBottomBar = Color(0xFF000000)
 
+private enum class DragHandle {
+    NONE,
+    BODY,
+    TOP_LEFT,
+    TOP_RIGHT,
+    BOTTOM_LEFT,
+    BOTTOM_RIGHT,
+    TOP_EDGE,
+    BOTTOM_EDGE,
+    LEFT_EDGE,
+    RIGHT_EDGE
+}
+
 /**
- * Pixel-perfect WhatsApp Profile Picture Square Cropper Dialog.
- * Matches WhatsApp's exact viewfinder with white corner handles, mid-edge ticks,
- * 3x3 grid overlay, dark scrim, smooth pinch-zoom/pan, 90° rotation, and bottom "Cancel / Rotate / Done" bar.
+ * WhatsApp Profile Picture Square Cropper Dialog.
+ *
+ * Feature behavior:
+ * - The image stays stationary in the center of the screen.
+ * - The square cropping window can be moved by dragging inside it.
+ * - The 4 white L-corners and 4 edge handles can be dragged to resize the square.
+ * - All movements and resizes strictly stay bounded inside the image boundaries.
  */
 @Composable
 fun SquareImageCropperDialog(
@@ -95,13 +109,15 @@ fun SquareImageCropperDialog(
     var isLoading by remember { mutableStateOf(true) }
     var isCropping by remember { mutableStateOf(false) }
 
-    // Transformation States
-    var scale by remember { mutableFloatStateOf(1.0f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
     var rotationDegrees by remember { mutableIntStateOf(0) }
 
-    // Load source bitmap safely on IO dispatcher
+    // Cropping box geometry state
+    var cropLeft by remember { mutableStateOf(0f) }
+    var cropTop by remember { mutableStateOf(0f) }
+    var cropSize by remember { mutableStateOf(0f) }
+    var activeImgRect by remember { mutableStateOf(Rect.Zero) }
+
+    // Load source bitmap safely
     LaunchedEffect(sourceUri) {
         withContext(Dispatchers.IO) {
             try {
@@ -142,7 +158,7 @@ fun SquareImageCropperDialog(
                     .navigationBarsPadding(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Main Cropper Viewport with Dark Scrim & WhatsApp Frame
+                // Interactive Cropper Viewport
                 BoxWithConstraints(
                     modifier = Modifier
                         .weight(1f)
@@ -150,16 +166,8 @@ fun SquareImageCropperDialog(
                     contentAlignment = Alignment.Center
                 ) {
                     val density = LocalDensity.current
-                    val containerWidthPx = constraints.maxWidth.toFloat()
-                    val containerHeightPx = constraints.maxHeight.toFloat()
-
-                    // WhatsApp crop square takes ~92% of the narrower screen dimension
-                    val cropSizePx = min(containerWidthPx * 0.92f, containerHeightPx * 0.92f)
-                    val cropSizeDp = with(density) { cropSizePx.toDp() }
-
-                    val cropLeft = (containerWidthPx - cropSizePx) / 2f
-                    val cropTop = (containerHeightPx - cropSizePx) / 2f
-                    val cropRect = Rect(cropLeft, cropTop, cropLeft + cropSizePx, cropTop + cropSizePx)
+                    val containerWidth = constraints.maxWidth.toFloat()
+                    val containerHeight = constraints.maxHeight.toFloat()
 
                     if (isLoading) {
                         CircularProgressIndicator(
@@ -167,191 +175,276 @@ fun SquareImageCropperDialog(
                             modifier = Modifier.size(48.dp)
                         )
                     } else if (sourceBitmap != null) {
-                        val bmp = sourceBitmap!!
+                        // Obtain rotated bitmap instance
+                        val bmp = remember(sourceBitmap, rotationDegrees) {
+                            if (rotationDegrees != 0) {
+                                val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+                                Bitmap.createBitmap(sourceBitmap!!, 0, 0, sourceBitmap!!.width, sourceBitmap!!.height, matrix, true)
+                            } else {
+                                sourceBitmap!!
+                            }
+                        }
 
-                        // Gesture Container across the full available viewport
-                        Box(
+                        // Calculate fitted image rect inside container
+                        val imgWidth = bmp.width.toFloat()
+                        val imgHeight = bmp.height.toFloat()
+                        val containerAspect = containerWidth / containerHeight
+                        val imgAspect = imgWidth / imgHeight
+
+                        val displayedImgWidth: Float
+                        val displayedImgHeight: Float
+                        if (imgAspect > containerAspect) {
+                            // Width fits container, height letterboxed
+                            displayedImgWidth = containerWidth
+                            displayedImgHeight = containerWidth / imgAspect
+                        } else {
+                            // Height fits container, width pillarboxed
+                            displayedImgHeight = containerHeight
+                            displayedImgWidth = containerHeight * imgAspect
+                        }
+
+                        val imgLeft = (containerWidth - displayedImgWidth) / 2f
+                        val imgTop = (containerHeight - displayedImgHeight) / 2f
+                        val imgRect = remember(displayedImgWidth, displayedImgHeight, imgLeft, imgTop) {
+                            Rect(imgLeft, imgTop, imgLeft + displayedImgWidth, imgTop + displayedImgHeight)
+                        }
+
+                        // Reset or update crop box whenever image bounds change (e.g. on rotation or initial load)
+                        LaunchedEffect(imgRect) {
+                            activeImgRect = imgRect
+                            val initialSize = min(imgRect.width, imgRect.height)
+                            cropSize = initialSize
+                            cropLeft = imgRect.left + (imgRect.width - initialSize) / 2f
+                            cropTop = imgRect.top + (imgRect.height - initialSize) / 2f
+                        }
+
+                        var activeHandle by remember { mutableStateOf(DragHandle.NONE) }
+
+                        val minCropSizePx = with(density) { 60.dp.toPx() }
+                        val touchRadiusPx = with(density) { 36.dp.toPx() }
+
+                        // Canvas + Pointer Input for stationary image & draggable crop window
+                        Canvas(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .pointerInput(Unit) {
-                                    detectTransformGestures { _, pan, zoom, _ ->
-                                        scale = (scale * zoom).coerceIn(0.6f, 6.0f)
-                                        offsetX += pan.x
-                                        offsetY += pan.y
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
+                                .pointerInput(imgRect, cropLeft, cropTop, cropSize) {
+                                    detectDragGestures(
+                                        onDragStart = { startOffset ->
+                                            val currentRect = Rect(cropLeft, cropTop, cropLeft + cropSize, cropTop + cropSize)
+
+                                            // Check 4 Corners first (highest priority)
+                                            val distTopLeft = (startOffset - currentRect.topLeft).getDistance()
+                                            val distTopRight = (startOffset - currentRect.topRight).getDistance()
+                                            val distBottomLeft = (startOffset - currentRect.bottomLeft).getDistance()
+                                            val distBottomRight = (startOffset - currentRect.bottomRight).getDistance()
+
+                                            // Check 4 Edges
+                                            val distTopEdge = abs(startOffset.y - currentRect.top)
+                                            val distBottomEdge = abs(startOffset.y - currentRect.bottom)
+                                            val distLeftEdge = abs(startOffset.x - currentRect.left)
+                                            val distRightEdge = abs(startOffset.x - currentRect.right)
+
+                                            activeHandle = when {
+                                                distTopLeft <= touchRadiusPx -> DragHandle.TOP_LEFT
+                                                distTopRight <= touchRadiusPx -> DragHandle.TOP_RIGHT
+                                                distBottomLeft <= touchRadiusPx -> DragHandle.BOTTOM_LEFT
+                                                distBottomRight <= touchRadiusPx -> DragHandle.BOTTOM_RIGHT
+                                                distTopEdge <= touchRadiusPx && startOffset.x in currentRect.left..currentRect.right -> DragHandle.TOP_EDGE
+                                                distBottomEdge <= touchRadiusPx && startOffset.x in currentRect.left..currentRect.right -> DragHandle.BOTTOM_EDGE
+                                                distLeftEdge <= touchRadiusPx && startOffset.y in currentRect.top..currentRect.bottom -> DragHandle.LEFT_EDGE
+                                                distRightEdge <= touchRadiusPx && startOffset.y in currentRect.top..currentRect.bottom -> DragHandle.RIGHT_EDGE
+                                                currentRect.contains(startOffset) -> DragHandle.BODY
+                                                else -> DragHandle.NONE
+                                            }
+                                        },
+                                        onDragEnd = { activeHandle = DragHandle.NONE },
+                                        onDragCancel = { activeHandle = DragHandle.NONE },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+
+                                            when (activeHandle) {
+                                                DragHandle.BODY -> {
+                                                    // Move the square within image boundaries
+                                                    val newLeft = (cropLeft + dragAmount.x).coerceIn(
+                                                        imgRect.left,
+                                                        imgRect.right - cropSize
+                                                    )
+                                                    val newTop = (cropTop + dragAmount.y).coerceIn(
+                                                        imgRect.top,
+                                                        imgRect.bottom - cropSize
+                                                    )
+                                                    cropLeft = newLeft
+                                                    cropTop = newTop
+                                                }
+
+                                                DragHandle.TOP_LEFT -> {
+                                                    val anchorRight = cropLeft + cropSize
+                                                    val anchorBottom = cropTop + cropSize
+                                                    val delta = max(-dragAmount.x, -dragAmount.y)
+                                                    val maxAllowedSize = min(anchorRight - imgRect.left, anchorBottom - imgRect.top)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropLeft = anchorRight - newSize
+                                                    cropTop = anchorBottom - newSize
+                                                }
+
+                                                DragHandle.TOP_RIGHT -> {
+                                                    val anchorLeft = cropLeft
+                                                    val anchorBottom = cropTop + cropSize
+                                                    val delta = max(dragAmount.x, -dragAmount.y)
+                                                    val maxAllowedSize = min(imgRect.right - anchorLeft, anchorBottom - imgRect.top)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropLeft = anchorLeft
+                                                    cropTop = anchorBottom - newSize
+                                                }
+
+                                                DragHandle.BOTTOM_LEFT -> {
+                                                    val anchorRight = cropLeft + cropSize
+                                                    val anchorTop = cropTop
+                                                    val delta = max(-dragAmount.x, dragAmount.y)
+                                                    val maxAllowedSize = min(anchorRight - imgRect.left, imgRect.bottom - anchorTop)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropLeft = anchorRight - newSize
+                                                    cropTop = anchorTop
+                                                }
+
+                                                DragHandle.BOTTOM_RIGHT -> {
+                                                    val anchorLeft = cropLeft
+                                                    val anchorTop = cropTop
+                                                    val delta = max(dragAmount.x, dragAmount.y)
+                                                    val maxAllowedSize = min(imgRect.right - anchorLeft, imgRect.bottom - anchorTop)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropLeft = anchorLeft
+                                                    cropTop = anchorTop
+                                                }
+
+                                                DragHandle.TOP_EDGE -> {
+                                                    val anchorBottom = cropTop + cropSize
+                                                    val centerX = cropLeft + cropSize / 2f
+                                                    val delta = -dragAmount.y
+                                                    val maxAllowedSize = min(anchorBottom - imgRect.top, min(imgRect.right - centerX, centerX - imgRect.left) * 2f)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropTop = anchorBottom - newSize
+                                                    cropLeft = (centerX - newSize / 2f).coerceIn(imgRect.left, imgRect.right - newSize)
+                                                }
+
+                                                DragHandle.BOTTOM_EDGE -> {
+                                                    val anchorTop = cropTop
+                                                    val centerX = cropLeft + cropSize / 2f
+                                                    val delta = dragAmount.y
+                                                    val maxAllowedSize = min(imgRect.bottom - anchorTop, min(imgRect.right - centerX, centerX - imgRect.left) * 2f)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropTop = anchorTop
+                                                    cropLeft = (centerX - newSize / 2f).coerceIn(imgRect.left, imgRect.right - newSize)
+                                                }
+
+                                                DragHandle.LEFT_EDGE -> {
+                                                    val anchorRight = cropLeft + cropSize
+                                                    val centerY = cropTop + cropSize / 2f
+                                                    val delta = -dragAmount.x
+                                                    val maxAllowedSize = min(anchorRight - imgRect.left, min(imgRect.bottom - centerY, centerY - imgRect.top) * 2f)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropLeft = anchorRight - newSize
+                                                    cropTop = (centerY - newSize / 2f).coerceIn(imgRect.top, imgRect.bottom - newSize)
+                                                }
+
+                                                DragHandle.RIGHT_EDGE -> {
+                                                    val anchorLeft = cropLeft
+                                                    val centerY = cropTop + cropSize / 2f
+                                                    val delta = dragAmount.x
+                                                    val maxAllowedSize = min(imgRect.right - anchorLeft, min(imgRect.bottom - centerY, centerY - imgRect.top) * 2f)
+                                                    val newSize = (cropSize + delta).coerceIn(minCropSizePx, maxAllowedSize)
+                                                    cropSize = newSize
+                                                    cropLeft = anchorLeft
+                                                    cropTop = (centerY - newSize / 2f).coerceIn(imgRect.top, imgRect.bottom - newSize)
+                                                }
+
+                                                DragHandle.NONE -> {}
+                                            }
+                                        }
+                                    )
+                                }
                         ) {
-                            // Full-width background image with scale & offset transformations
-                            androidx.compose.foundation.Image(
-                                bitmap = bmp.asImageBitmap(),
-                                contentDescription = "Source Photo",
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier
-                                    .size(cropSizeDp)
-                                    .graphicsLayer {
-                                        scaleX = scale
-                                        scaleY = scale
-                                        translationX = offsetX
-                                        translationY = offsetY
-                                        rotationZ = rotationDegrees.toFloat()
-                                    }
+                            val currentCropRect = Rect(cropLeft, cropTop, cropLeft + cropSize, cropTop + cropSize)
+
+                            // 1. Draw Stationary Image inside imgRect
+                            drawImage(
+                                image = bmp.asImageBitmap(),
+                                dstOffset = androidx.compose.ui.unit.IntOffset(imgRect.left.toInt(), imgRect.top.toInt()),
+                                dstSize = androidx.compose.ui.unit.IntSize(imgRect.width.toInt(), imgRect.height.toInt())
                             )
 
-                            // WhatsApp Overlay: Scrim outside crop square + L-corners + Mid-edge ticks + 3x3 Grid
-                            Canvas(modifier = Modifier.fillMaxSize()) {
-                                val totalW = size.width
-                                val totalH = size.height
-
-                                // 1. Dark Scrim outside the square crop window
-                                val scrimPath = Path().apply {
-                                    fillType = PathFillType.EvenOdd
-                                    // Outer full screen
-                                    addRect(Rect(0f, 0f, totalW, totalH))
-                                    // Inner crop hole
-                                    addRect(cropRect)
-                                }
-                                drawPath(scrimPath, color = Color.Black.copy(alpha = 0.65f))
-
-                                // 2. Outer Thin Crop Square Border
-                                drawRect(
-                                    color = Color.White.copy(alpha = 0.55f),
-                                    topLeft = Offset(cropRect.left, cropRect.top),
-                                    size = Size(cropRect.width, cropRect.height),
-                                    style = Stroke(width = 1.dp.toPx())
-                                )
-
-                                // 3. WhatsApp 3x3 Grid (Rule of Thirds)
-                                val thirdW = cropRect.width / 3f
-                                val thirdH = cropRect.height / 3f
-                                val gridColor = Color.White.copy(alpha = 0.45f)
-                                val gridStroke = 0.8.dp.toPx()
-
-                                // Vertical lines
-                                drawLine(
-                                    color = gridColor,
-                                    start = Offset(cropRect.left + thirdW, cropRect.top),
-                                    end = Offset(cropRect.left + thirdW, cropRect.bottom),
-                                    strokeWidth = gridStroke
-                                )
-                                drawLine(
-                                    color = gridColor,
-                                    start = Offset(cropRect.left + thirdW * 2f, cropRect.top),
-                                    end = Offset(cropRect.left + thirdW * 2f, cropRect.bottom),
-                                    strokeWidth = gridStroke
-                                )
-
-                                // Horizontal lines
-                                drawLine(
-                                    color = gridColor,
-                                    start = Offset(cropRect.left, cropRect.top + thirdH),
-                                    end = Offset(cropRect.right, cropRect.top + thirdH),
-                                    strokeWidth = gridStroke
-                                )
-                                drawLine(
-                                    color = gridColor,
-                                    start = Offset(cropRect.left, cropRect.top + thirdH * 2f),
-                                    end = Offset(cropRect.right, cropRect.top + thirdH * 2f),
-                                    strokeWidth = gridStroke
-                                )
-
-                                // 4. WhatsApp Thick White L-Corners
-                                val cornerLength = 22.dp.toPx()
-                                val cornerStroke = 3.5.dp.toPx()
-                                val cornerColor = Color.White
-
-                                // Top-Left Corner
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left - cornerStroke / 2f, cropRect.top),
-                                    end = Offset(cropRect.left + cornerLength, cropRect.top),
-                                    strokeWidth = cornerStroke
-                                )
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left, cropRect.top - cornerStroke / 2f),
-                                    end = Offset(cropRect.left, cropRect.top + cornerLength),
-                                    strokeWidth = cornerStroke
-                                )
-
-                                // Top-Right Corner
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.right + cornerStroke / 2f, cropRect.top),
-                                    end = Offset(cropRect.right - cornerLength, cropRect.top),
-                                    strokeWidth = cornerStroke
-                                )
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.right, cropRect.top - cornerStroke / 2f),
-                                    end = Offset(cropRect.right, cropRect.top + cornerLength),
-                                    strokeWidth = cornerStroke
-                                )
-
-                                // Bottom-Left Corner
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left - cornerStroke / 2f, cropRect.bottom),
-                                    end = Offset(cropRect.left + cornerLength, cropRect.bottom),
-                                    strokeWidth = cornerStroke
-                                )
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left, cropRect.bottom + cornerStroke / 2f),
-                                    end = Offset(cropRect.left, cropRect.bottom - cornerLength),
-                                    strokeWidth = cornerStroke
-                                )
-
-                                // Bottom-Right Corner
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.right + cornerStroke / 2f, cropRect.bottom),
-                                    end = Offset(cropRect.right - cornerLength, cropRect.bottom),
-                                    strokeWidth = cornerStroke
-                                )
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.right, cropRect.bottom + cornerStroke / 2f),
-                                    end = Offset(cropRect.right, cropRect.bottom - cornerLength),
-                                    strokeWidth = cornerStroke
-                                )
-
-                                // 5. WhatsApp Mid-Edge Indicator Ticks
-                                val midTickLength = 16.dp.toPx()
-                                val midTickStroke = 3.dp.toPx()
-
-                                // Top Edge Center Tick
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left + cropRect.width / 2f - midTickLength / 2f, cropRect.top),
-                                    end = Offset(cropRect.left + cropRect.width / 2f + midTickLength / 2f, cropRect.top),
-                                    strokeWidth = midTickStroke
-                                )
-
-                                // Bottom Edge Center Tick
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left + cropRect.width / 2f - midTickLength / 2f, cropRect.bottom),
-                                    end = Offset(cropRect.left + cropRect.width / 2f + midTickLength / 2f, cropRect.bottom),
-                                    strokeWidth = midTickStroke
-                                )
-
-                                // Left Edge Center Tick
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.left, cropRect.top + cropRect.height / 2f - midTickLength / 2f),
-                                    end = Offset(cropRect.left, cropRect.top + cropRect.height / 2f + midTickLength / 2f),
-                                    strokeWidth = midTickStroke
-                                )
-
-                                // Right Edge Center Tick
-                                drawLine(
-                                    color = cornerColor,
-                                    start = Offset(cropRect.right, cropRect.top + cropRect.height / 2f - midTickLength / 2f),
-                                    end = Offset(cropRect.right, cropRect.top + cropRect.height / 2f + midTickLength / 2f),
-                                    strokeWidth = midTickStroke
-                                )
+                            // 2. Dark Scrim over everything outside the crop window
+                            val totalW = size.width
+                            val totalH = size.height
+                            val scrimPath = Path().apply {
+                                fillType = PathFillType.EvenOdd
+                                addRect(Rect(0f, 0f, totalW, totalH))
+                                addRect(currentCropRect)
                             }
+                            drawPath(scrimPath, color = Color.Black.copy(alpha = 0.65f))
+
+                            // 3. Thin Crop Square Border
+                            drawRect(
+                                color = Color.White.copy(alpha = 0.55f),
+                                topLeft = Offset(currentCropRect.left, currentCropRect.top),
+                                size = Size(currentCropRect.width, currentCropRect.height),
+                                style = Stroke(width = 1.dp.toPx())
+                            )
+
+                            // 4. WhatsApp 3x3 Grid
+                            val thirdW = currentCropRect.width / 3f
+                            val thirdH = currentCropRect.height / 3f
+                            val gridColor = Color.White.copy(alpha = 0.45f)
+                            val gridStroke = 0.8.dp.toPx()
+
+                            // Vertical lines
+                            drawLine(gridColor, Offset(currentCropRect.left + thirdW, currentCropRect.top), Offset(currentCropRect.left + thirdW, currentCropRect.bottom), gridStroke)
+                            drawLine(gridColor, Offset(currentCropRect.left + thirdW * 2f, currentCropRect.top), Offset(currentCropRect.left + thirdW * 2f, currentCropRect.bottom), gridStroke)
+
+                            // Horizontal lines
+                            drawLine(gridColor, Offset(currentCropRect.left, currentCropRect.top + thirdH), Offset(currentCropRect.right, currentCropRect.top + thirdH), gridStroke)
+                            drawLine(gridColor, Offset(currentCropRect.left, currentCropRect.top + thirdH * 2f), Offset(currentCropRect.right, currentCropRect.top + thirdH * 2f), gridStroke)
+
+                            // 5. WhatsApp Thick White L-Corners
+                            val cornerLen = 22.dp.toPx()
+                            val cornerStroke = 3.5.dp.toPx()
+                            val cornerColor = Color.White
+
+                            // Top-Left Corner
+                            drawLine(cornerColor, Offset(currentCropRect.left - cornerStroke / 2f, currentCropRect.top), Offset(currentCropRect.left + cornerLen, currentCropRect.top), cornerStroke)
+                            drawLine(cornerColor, Offset(currentCropRect.left, currentCropRect.top - cornerStroke / 2f), Offset(currentCropRect.left, currentCropRect.top + cornerLen), cornerStroke)
+
+                            // Top-Right Corner
+                            drawLine(cornerColor, Offset(currentCropRect.right + cornerStroke / 2f, currentCropRect.top), Offset(currentCropRect.right - cornerLen, currentCropRect.top), cornerStroke)
+                            drawLine(cornerColor, Offset(currentCropRect.right, currentCropRect.top - cornerStroke / 2f), Offset(currentCropRect.right, currentCropRect.top + cornerLen), cornerStroke)
+
+                            // Bottom-Left Corner
+                            drawLine(cornerColor, Offset(currentCropRect.left - cornerStroke / 2f, currentCropRect.bottom), Offset(currentCropRect.left + cornerLen, currentCropRect.bottom), cornerStroke)
+                            drawLine(cornerColor, Offset(currentCropRect.left, currentCropRect.bottom + cornerStroke / 2f), Offset(currentCropRect.left, currentCropRect.bottom - cornerLen), cornerStroke)
+
+                            // Bottom-Right Corner
+                            drawLine(cornerColor, Offset(currentCropRect.right + cornerStroke / 2f, currentCropRect.bottom), Offset(currentCropRect.right - cornerLen, currentCropRect.bottom), cornerStroke)
+                            drawLine(cornerColor, Offset(currentCropRect.right, currentCropRect.bottom + cornerStroke / 2f), Offset(currentCropRect.right, currentCropRect.bottom - cornerLen), cornerStroke)
+
+                            // 6. WhatsApp Mid-Edge Ticks
+                            val midTickLen = 16.dp.toPx()
+                            val midTickStroke = 3.dp.toPx()
+
+                            // Top Mid Tick
+                            drawLine(cornerColor, Offset(currentCropRect.left + currentCropRect.width / 2f - midTickLen / 2f, currentCropRect.top), Offset(currentCropRect.left + currentCropRect.width / 2f + midTickLen / 2f, currentCropRect.top), midTickStroke)
+                            // Bottom Mid Tick
+                            drawLine(cornerColor, Offset(currentCropRect.left + currentCropRect.width / 2f - midTickLen / 2f, currentCropRect.bottom), Offset(currentCropRect.left + currentCropRect.width / 2f + midTickLen / 2f, currentCropRect.bottom), midTickStroke)
+                            // Left Mid Tick
+                            drawLine(cornerColor, Offset(currentCropRect.left, currentCropRect.top + currentCropRect.height / 2f - midTickLen / 2f), Offset(currentCropRect.left, currentCropRect.top + currentCropRect.height / 2f + midTickLen / 2f), midTickStroke)
+                            // Right Mid Tick
+                            drawLine(cornerColor, Offset(currentCropRect.right, currentCropRect.top + currentCropRect.height / 2f - midTickLen / 2f), Offset(currentCropRect.right, currentCropRect.top + currentCropRect.height / 2f + midTickLen / 2f), midTickStroke)
                         }
                     }
                 }
@@ -370,7 +463,7 @@ fun SquareImageCropperDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Cancel Button
+                        // Cancel
                         Text(
                             text = "Cancel",
                             color = WhatsAppGreen,
@@ -387,7 +480,7 @@ fun SquareImageCropperDialog(
                                 .testTag("crop_cancel_button")
                         )
 
-                        // WhatsApp Rotate Button (Counter-clockwise / clockwise 90 deg)
+                        // Rotate 90 degrees
                         IconButton(
                             onClick = {
                                 rotationDegrees = (rotationDegrees + 90) % 360
@@ -405,7 +498,7 @@ fun SquareImageCropperDialog(
                             )
                         }
 
-                        // Done Button
+                        // Done
                         if (isCropping) {
                             CircularProgressIndicator(
                                 color = WhatsAppGreen,
@@ -424,16 +517,22 @@ fun SquareImageCropperDialog(
                                         interactionSource = remember { MutableInteractionSource() },
                                         indication = ripple(bounded = false, radius = 24.dp)
                                     ) {
-                                        if (sourceBitmap != null && !isCropping) {
+                                        if (sourceBitmap != null && !isCropping && cropSize > 0f && activeImgRect.width > 0f) {
                                             isCropping = true
+                                            val normX = ((cropLeft - activeImgRect.left) / activeImgRect.width).coerceIn(0f, 1f)
+                                            val normY = ((cropTop - activeImgRect.top) / activeImgRect.height).coerceIn(0f, 1f)
+                                            val normSizeX = (cropSize / activeImgRect.width).coerceIn(0f, 1f)
+                                            val normSizeY = (cropSize / activeImgRect.height).coerceIn(0f, 1f)
+
                                             coroutineScope.launch {
-                                                val croppedUri = cropAndSaveWhatsAppSquare(
+                                                val croppedUri = cropFromRotatedBitmap(
                                                     context = context,
                                                     source = sourceBitmap!!,
-                                                    scale = scale,
-                                                    offsetX = offsetX,
-                                                    offsetY = offsetY,
-                                                    rotationDegrees = rotationDegrees
+                                                    rotationDegrees = rotationDegrees,
+                                                    normX = normX,
+                                                    normY = normY,
+                                                    normSizeX = normSizeX,
+                                                    normSizeY = normSizeY
                                                 )
                                                 isCropping = false
                                                 if (croppedUri != null) {
@@ -456,18 +555,18 @@ fun SquareImageCropperDialog(
 }
 
 /**
- * Computes exact WhatsApp square crop based on scale, pan offset, and 90-degree rotations.
+ * Executes high quality square crop from the user-selected crop boundaries on the stationary photo.
  */
-private suspend fun cropAndSaveWhatsAppSquare(
+private suspend fun cropFromRotatedBitmap(
     context: Context,
     source: Bitmap,
-    scale: Float,
-    offsetX: Float,
-    offsetY: Float,
-    rotationDegrees: Int
+    rotationDegrees: Int,
+    normX: Float,
+    normY: Float,
+    normSizeX: Float,
+    normSizeY: Float
 ): Uri? = withContext(Dispatchers.IO) {
     try {
-        // 1. Apply rotation if rotated
         val rotatedSource = if (rotationDegrees != 0) {
             val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
             Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
@@ -475,36 +574,27 @@ private suspend fun cropAndSaveWhatsAppSquare(
             source
         }
 
-        val srcWidth = rotatedSource.width.toFloat()
-        val srcHeight = rotatedSource.height.toFloat()
+        val srcW = rotatedSource.width.toFloat()
+        val srcH = rotatedSource.height.toFloat()
 
-        // Size of the square region in native pixels
-        val minDim = min(srcWidth, srcHeight)
-        val cropRegionSize = (minDim / scale).coerceIn(32f, max(srcWidth, srcHeight))
-
-        // Center calculation with pan offset translation
-        val centerX = (srcWidth / 2f) - (offsetX / scale) * (minDim / 300f)
-        val centerY = (srcHeight / 2f) - (offsetY / scale) * (minDim / 300f)
-
-        val cropLeft = (centerX - cropRegionSize / 2f).coerceIn(0f, (srcWidth - cropRegionSize).coerceAtLeast(0f))
-        val cropTop = (centerY - cropRegionSize / 2f).coerceIn(0f, (srcHeight - cropRegionSize).coerceAtLeast(0f))
-        val cropWidth = min(cropRegionSize, srcWidth - cropLeft)
-        val cropHeight = min(cropRegionSize, srcHeight - cropTop)
-        val finalCropDim = min(cropWidth, cropHeight).toInt().coerceAtLeast(1)
+        val cropX = (normX * srcW).toInt().coerceIn(0, (srcW - 1).toInt())
+        val cropY = (normY * srcH).toInt().coerceIn(0, (srcH - 1).toInt())
+        val cropW = (normSizeX * srcW).toInt().coerceIn(1, (srcW - cropX).toInt())
+        val cropH = (normSizeY * srcH).toInt().coerceIn(1, (srcH - cropY).toInt())
+        val cropDim = min(cropW, cropH)
 
         val cropped = Bitmap.createBitmap(
             rotatedSource,
-            cropLeft.toInt().coerceAtLeast(0),
-            cropTop.toInt().coerceAtLeast(0),
-            finalCropDim,
-            finalCropDim
+            cropX,
+            cropY,
+            cropDim,
+            cropDim
         )
 
         // Scale to clean standard 512x512 square profile photo
         val targetSize = 512
         val scaledSquare = Bitmap.createScaledBitmap(cropped, targetSize, targetSize, true)
 
-        // Save to cache
         val outputDir = File(context.cacheDir, "cropped_avatars").apply { mkdirs() }
         val outputFile = File(outputDir, "whatsapp_avatar_${System.currentTimeMillis()}.jpg")
         FileOutputStream(outputFile).use { out ->
@@ -513,7 +603,7 @@ private suspend fun cropAndSaveWhatsAppSquare(
 
         Uri.fromFile(outputFile)
     } catch (e: Exception) {
-        Log.e("WhatsAppCropper", "cropAndSaveWhatsAppSquare failed: ${e.message}", e)
+        Log.e("WhatsAppCropper", "cropFromRotatedBitmap failed: ${e.message}", e)
         null
     }
 }
