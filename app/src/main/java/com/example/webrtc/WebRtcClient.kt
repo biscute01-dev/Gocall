@@ -146,6 +146,8 @@ class WebRtcClient(private val context: Context) {
         val adm = JavaAudioDeviceModule.builder(context)
             .setUseHardwareAcousticEchoCanceler(true)
             .setUseHardwareNoiseSuppressor(true)
+            .setUseStereoInput(false)
+            .setUseStereoOutput(false)
             .setSamplesReadyCallback(object : JavaAudioDeviceModule.SamplesReadyCallback {
                 override fun onWebRtcAudioRecordSamplesReady(samples: JavaAudioDeviceModule.AudioSamples) {
                     remoteAudioListener?.invoke(
@@ -177,12 +179,15 @@ class WebRtcClient(private val context: Context) {
     fun startLocalMedia() {
         val factory = peerConnectionFactory ?: return
 
-        // Audio track setup
+        // Audio track setup with ultra-low delay DSP constraints
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googTypingNoiseDetection", "false"))
+            mandatory.add(MediaConstraints.KeyValuePair("googAudioMirroring", "false"))
+            mandatory.add(MediaConstraints.KeyValuePair("googDAEchoCancellation", "true"))
         }
         audioSource = factory.createAudioSource(audioConstraints)
         localAudioTrack = factory.createAudioTrack("ARDAMSa0", audioSource)
@@ -243,6 +248,10 @@ class WebRtcClient(private val context: Context) {
             iceCandidatePoolSize = 10
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            enableDscp = true // Expedited Forwarding (DSCP 46) for audio packets
+            bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+            rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+            tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
         }
 
         peerConnection = factory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
@@ -351,10 +360,14 @@ class WebRtcClient(private val context: Context) {
 
         peerConnection?.createOffer(object : SdpObserver {
             override fun onCreateSuccess(desc: SessionDescription) {
+                val optimizedDesc = SessionDescription(
+                    desc.type,
+                    optimizeSdpForUltraLowLatencyAudio(desc.description)
+                )
                 peerConnection?.setLocalDescription(object : SdpObserver {
                     override fun onCreateSuccess(p0: SessionDescription?) {}
                     override fun onSetSuccess() {
-                        onSdpCreated(desc)
+                        onSdpCreated(optimizedDesc)
                     }
                     override fun onCreateFailure(err: String?) {
                         Log.e(TAG, "setLocalDescription createFailure: $err")
@@ -362,7 +375,7 @@ class WebRtcClient(private val context: Context) {
                     override fun onSetFailure(err: String?) {
                         Log.e(TAG, "setLocalDescription setFailure: $err")
                     }
-                }, desc)
+                }, optimizedDesc)
             }
 
             override fun onSetSuccess() {}
@@ -382,10 +395,14 @@ class WebRtcClient(private val context: Context) {
 
         peerConnection?.createAnswer(object : SdpObserver {
             override fun onCreateSuccess(desc: SessionDescription) {
+                val optimizedDesc = SessionDescription(
+                    desc.type,
+                    optimizeSdpForUltraLowLatencyAudio(desc.description)
+                )
                 peerConnection?.setLocalDescription(object : SdpObserver {
                     override fun onCreateSuccess(p0: SessionDescription?) {}
                     override fun onSetSuccess() {
-                        onSdpCreated(desc)
+                        onSdpCreated(optimizedDesc)
                     }
                     override fun onCreateFailure(err: String?) {
                         Log.e(TAG, "setLocalDescription (answer) failure: $err")
@@ -393,7 +410,7 @@ class WebRtcClient(private val context: Context) {
                     override fun onSetFailure(err: String?) {
                         Log.e(TAG, "setLocalDescription (answer) setFailure: $err")
                     }
-                }, desc)
+                }, optimizedDesc)
             }
 
             override fun onSetSuccess() {}
@@ -406,7 +423,8 @@ class WebRtcClient(private val context: Context) {
     }
 
     fun setRemoteDescription(sdp: String, type: SessionDescription.Type, onSetSuccess: () -> Unit = {}) {
-        val sdpDesc = SessionDescription(type, sdp)
+        val optimizedSdp = optimizeSdpForUltraLowLatencyAudio(sdp)
+        val sdpDesc = SessionDescription(type, optimizedSdp)
         peerConnection?.setRemoteDescription(object : SdpObserver {
             override fun onCreateSuccess(p0: SessionDescription?) {}
             override fun onSetSuccess() {
@@ -421,6 +439,81 @@ class WebRtcClient(private val context: Context) {
                 scope.launch { _events.emit(WebRtcEvent.Error("Remote description error: $err")) }
             }
         }, sdpDesc)
+    }
+
+    private fun optimizeSdpForUltraLowLatencyAudio(sdp: String): String {
+        try {
+            val lines = sdp.split("\r\n", "\n").toMutableList()
+            var opusPayloadType: String? = null
+
+            // 1. Locate Opus audio payload type (usually 111)
+            for (line in lines) {
+                if (line.startsWith("a=rtpmap:") && line.contains("opus/48000", ignoreCase = true)) {
+                    val parts = line.substringAfter("a=rtpmap:").trim().split(" ")
+                    if (parts.isNotEmpty()) {
+                        opusPayloadType = parts[0]
+                        break
+                    }
+                }
+            }
+
+            if (opusPayloadType == null) {
+                opusPayloadType = "111"
+            }
+
+            // WhatsApp / Messenger ultra low-latency parameters:
+            // - minptime=10 & ptime=10: 10ms audio packets (slashes buffering delay)
+            // - maxaveragebitrate=32000: 32 kbps HD VoIP (eliminates network buffer bloat)
+            // - useinbandfec=1: In-Band Forward Error Correction (reconstructs loss with 0ms delay)
+            // - usedtx=1: Discontinuous transmission (silent packet suppression)
+            // - stereo=0 & sprop-stereo=0: Mono voice transmission
+            // - cbr=0: Constrained VBR voice
+            val lowLatencyParams = "minptime=10;ptime=10;maxaveragebitrate=32000;useinbandfec=1;usedtx=1;stereo=0;sprop-stereo=0;cbr=0"
+
+            var fmtpFound = false
+            for (i in lines.indices) {
+                val line = lines[i]
+                if (line.startsWith("a=fmtp:$opusPayloadType")) {
+                    val existingParams = line.substringAfter("a=fmtp:$opusPayloadType").trim()
+                    val paramMap = mutableMapOf<String, String>()
+                    existingParams.split(";").forEach { kv ->
+                        val pair = kv.trim().split("=")
+                        if (pair.size == 2) {
+                            paramMap[pair[0].trim()] = pair[1].trim()
+                        }
+                    }
+
+                    // Enforce low latency voice settings
+                    paramMap["minptime"] = "10"
+                    paramMap["ptime"] = "10"
+                    paramMap["maxaveragebitrate"] = "32000"
+                    paramMap["useinbandfec"] = "1"
+                    paramMap["usedtx"] = "1"
+                    paramMap["stereo"] = "0"
+                    paramMap["sprop-stereo"] = "0"
+                    paramMap["cbr"] = "0"
+
+                    val merged = paramMap.entries.joinToString(";") { "${it.key}=${it.value}" }
+                    lines[i] = "a=fmtp:$opusPayloadType $merged"
+                    fmtpFound = true
+                    break
+                }
+            }
+
+            if (!fmtpFound) {
+                for (i in lines.indices) {
+                    if (lines[i].startsWith("a=rtpmap:$opusPayloadType")) {
+                        lines.add(i + 1, "a=fmtp:$opusPayloadType $lowLatencyParams")
+                        break
+                    }
+                }
+            }
+
+            return lines.joinToString("\r\n")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error optimizing SDP: ${e.message}")
+            return sdp
+        }
     }
 
     fun addIceCandidate(candidate: IceCandidate) {
