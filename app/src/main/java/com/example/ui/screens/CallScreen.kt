@@ -488,6 +488,20 @@ fun CallScreen(
                     )
                 }
 
+                // Floating Local Video Preview (Draggable Picture-in-Picture)
+                if (rtcClient != null && callState is CallState.Connected) {
+                    FloatingLocalPreview(
+                        webRtcClient = rtcClient,
+                        isCameraEnabled = isCameraEnabled,
+                        isFrontCamera = isFrontCamera,
+                        onSwitchCamera = { viewModel.switchCamera() },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .statusBarsPadding()
+                            .padding(top = 65.dp, end = 16.dp)
+                    )
+                }
+
                 // Processing Recording Notice
                 if (recordingStatus is RecordingStatus.Processing) {
                     Card(
@@ -1791,3 +1805,90 @@ private fun AudioOnlyPeerOverlay(roomId: String) {
         }
     }
 }
+
+@Composable
+fun FloatingLocalPreview(
+    webRtcClient: com.example.webrtc.WebRtcClient,
+    isCameraEnabled: Boolean,
+    isFrontCamera: Boolean,
+    onSwitchCamera: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.95f)),
+        border = androidx.compose.foundation.BorderStroke(1.5.dp, GlassDarkBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        modifier = modifier
+            .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+            .pointerInput(Unit) {
+                detectDragGestures { change, dragAmount ->
+                    change.consume()
+                    offsetX += dragAmount.x
+                    offsetY += dragAmount.y
+                }
+            }
+            .size(width = 110.dp, height = 155.dp)
+            .clip(RoundedCornerShape(16.dp))
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (isCameraEnabled) {
+                LocalVideoView(
+                    webRtcClient = webRtcClient,
+                    isMirror = isFrontCamera,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(SlateDark800),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VideocamOff,
+                            contentDescription = "Camera off",
+                            tint = SlateTextMuted,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Text(
+                            text = "Camera Off",
+                            color = SlateTextMuted,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            // Quick flip camera button on floating preview
+            if (isCameraEnabled) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .clickable { onSwitchCamera() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Cameraswitch,
+                        contentDescription = "Flip camera",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+

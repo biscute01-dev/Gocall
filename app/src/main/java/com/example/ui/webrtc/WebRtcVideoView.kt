@@ -26,6 +26,9 @@ fun LocalVideoView(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            setZOrderMediaOverlay(true)
+            setEnableHardwareScaler(true)
+            setFpsReduction(Float.POSITIVE_INFINITY)
         }
     }
 
@@ -33,6 +36,7 @@ fun LocalVideoView(
         webRtcClient.initLocalSurfaceView(renderer)
         renderer.setMirror(isMirror)
         renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+        renderer.setFpsReduction(Float.POSITIVE_INFINITY)
 
         onDispose {
             try {
@@ -67,6 +71,8 @@ fun RemoteVideoView(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            setEnableHardwareScaler(true)
+            setFpsReduction(Float.POSITIVE_INFINITY)
         }
     }
 
@@ -76,6 +82,7 @@ fun RemoteVideoView(
             renderer.setEnableHardwareScaler(true)
             renderer.setMirror(false)
             renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            renderer.setFpsReduction(Float.POSITIVE_INFINITY)
         } catch (e: Exception) {
             // Already initialized or context issue
         }
