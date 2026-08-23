@@ -75,6 +75,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.auth.UserProfile
+import com.example.ui.components.SquareImageCropperDialog
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CyanAccent
@@ -116,6 +117,7 @@ fun ProfileSetupScreen(
         mutableStateOf(existingProfile?.username ?: "")
     }
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var uncroppedImageUri by remember { mutableStateOf<Uri?>(null) }
 
     val isSavingProfile by authViewModel.isSavingProfile.collectAsState()
     val usernameStatus by authViewModel.usernameStatus.collectAsState()
@@ -126,7 +128,7 @@ fun ProfileSetupScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
-            selectedImageUri = uri
+            uncroppedImageUri = uri
         }
     }
 
@@ -504,6 +506,18 @@ fun ProfileSetupScreen(
             }
 
             Spacer(modifier = Modifier.height(32.dp))
+        }
+
+        // Facebook/WhatsApp style Square Profile Photo Cropper
+        if (uncroppedImageUri != null) {
+            SquareImageCropperDialog(
+                sourceUri = uncroppedImageUri!!,
+                onDismiss = { uncroppedImageUri = null },
+                onCropSuccess = { croppedUri ->
+                    selectedImageUri = croppedUri
+                    uncroppedImageUri = null
+                }
+            )
         }
     }
 }

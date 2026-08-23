@@ -102,7 +102,7 @@ class FriendsRepository(
     }
 
     /**
-     * Real-time flow of current user's friends
+     * Real-time flow of current user's friends with live profile and presence sync
      */
     fun observeFriends(uid: String): Flow<List<FriendUser>> = callbackFlow {
         if (uid.isBlank()) {
@@ -111,19 +111,93 @@ class FriendsRepository(
             return@callbackFlow
         }
 
-        val ref = database.getReference(NODE_FRIENDS).child(uid)
-        val listener = object : ValueEventListener {
+        val friendsRef = database.getReference(NODE_FRIENDS).child(uid)
+        val usersRef = database.getReference(NODE_USERS)
+        val friendsMap = mutableMapOf<String, FriendUser>()
+        val userListeners = mutableMapOf<String, ValueEventListener>()
+
+        fun emitSortedFriends() {
+            val list = friendsMap.values.toList().sortedWith(
+                compareByDescending<FriendUser> { it.isOnline }
+                    .thenBy { it.displayName.lowercase() }
+            )
+            trySend(list)
+        }
+
+        val friendsListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                val friendsList = mutableListOf<FriendUser>()
+                val currentFriendUids = mutableSetOf<String>()
+
                 for (child in snapshot.children) {
-                    val friend = child.getValue(FriendUser::class.java)
-                    if (friend != null) {
-                        friendsList.add(friend)
+                    val friendUid = child.key ?: continue
+                    if (friendUid.isBlank()) continue
+                    currentFriendUids.add(friendUid)
+
+                    val storedFriend = child.getValue(FriendUser::class.java)
+                    val existing = friendsMap[friendUid]
+
+                    val friendUser = storedFriend?.copy(
+                        uid = friendUid,
+                        displayName = storedFriend.displayName.ifBlank { existing?.displayName ?: "Friend" },
+                        username = storedFriend.username.ifBlank { existing?.username ?: "" },
+                        avatarBase64 = storedFriend.avatarBase64 ?: existing?.avatarBase64,
+                        photoUrl = storedFriend.photoUrl ?: existing?.photoUrl
+                    ) ?: existing ?: FriendUser(uid = friendUid, displayName = "Friend", username = "")
+
+                    friendsMap[friendUid] = friendUser
+
+                    // Listen to authoritative live profile in /users/{friendUid}
+                    if (!userListeners.containsKey(friendUid)) {
+                        val userListener = object : ValueEventListener {
+                            override fun onDataChange(userSnap: DataSnapshot) {
+                                if (userSnap.exists()) {
+                                    val profile = userSnap.getValue(UserProfile::class.java)
+                                    val isOnline = userSnap.child("isOnline").getValue(Boolean::class.java) ?: false
+                                    val lastSeen = userSnap.child("lastSeen").getValue(Long::class.java) ?: System.currentTimeMillis()
+
+                                    val curr = friendsMap[friendUid]
+                                    val updatedName = profile?.displayName?.ifBlank { curr?.displayName ?: "Friend" }
+                                        ?: curr?.displayName
+                                        ?: "Friend"
+                                    val updatedUsername = profile?.username?.ifBlank { curr?.username ?: "" }
+                                        ?: curr?.username
+                                        ?: ""
+
+                                    friendsMap[friendUid] = FriendUser(
+                                        uid = friendUid,
+                                        displayName = updatedName,
+                                        username = updatedUsername,
+                                        email = profile?.email ?: curr?.email ?: "",
+                                        photoUrl = profile?.photoUrl ?: curr?.photoUrl,
+                                        avatarBase64 = profile?.avatarBase64 ?: curr?.avatarBase64,
+                                        localPhotoUri = profile?.localPhotoUri ?: curr?.localPhotoUri,
+                                        isOnline = isOnline,
+                                        lastSeen = lastSeen,
+                                        addedAt = curr?.addedAt ?: System.currentTimeMillis()
+                                    )
+                                    emitSortedFriends()
+                                }
+                            }
+
+                            override fun onCancelled(error: DatabaseError) {
+                                Log.w(TAG, "User listener error for $friendUid: ${error.message}")
+                            }
+                        }
+                        userListeners[friendUid] = userListener
+                        usersRef.child(friendUid).addValueEventListener(userListener)
                     }
                 }
-                // Sort by online first, then alphabetical display name
-                friendsList.sortWith(compareByDescending<FriendUser> { it.isOnline }.thenBy { it.displayName.lowercase() })
-                trySend(friendsList)
+
+                // Clean up removed friends
+                val removedUids = friendsMap.keys.filter { !currentFriendUids.contains(it) }
+                for (removedUid in removedUids) {
+                    friendsMap.remove(removedUid)
+                    userListeners.remove(removedUid)?.let { listener ->
+                        usersRef.child(removedUid).removeEventListener(listener)
+                    }
+                }
+
+                emitSortedFriends()
             }
 
             override fun onCancelled(error: DatabaseError) {
@@ -132,8 +206,15 @@ class FriendsRepository(
             }
         }
 
-        ref.addValueEventListener(listener)
-        awaitClose { ref.removeEventListener(listener) }
+        friendsRef.addValueEventListener(friendsListener)
+
+        awaitClose {
+            friendsRef.removeEventListener(friendsListener)
+            userListeners.forEach { (friendUid, listener) ->
+                usersRef.child(friendUid).removeEventListener(listener)
+            }
+            userListeners.clear()
+        }
     }
 
     /**

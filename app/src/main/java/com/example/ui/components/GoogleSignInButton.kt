@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.example.auth.FriendUser
 import com.example.auth.UserProfile
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.CyanGlow
@@ -314,4 +315,38 @@ fun UserAvatar(
             }
         }
     }
+}
+
+/**
+ * Avatar for a friend or contact with automatic Base64, photoUrl, and initials decoding.
+ */
+@Composable
+fun FriendAvatar(
+    friend: FriendUser,
+    modifier: Modifier = Modifier,
+    size: Dp = 50.dp,
+    borderWidth: Dp = 2.dp,
+    borderColor: Color = CyanGlow,
+    onClick: (() -> Unit)? = null
+) {
+    val tempProfile = remember(friend) {
+        UserProfile(
+            uid = friend.uid,
+            displayName = friend.displayName,
+            username = friend.username,
+            email = friend.email,
+            photoUrl = friend.photoUrl,
+            avatarBase64 = friend.avatarBase64,
+            localPhotoUri = friend.localPhotoUri
+        )
+    }
+
+    UserAvatar(
+        userProfile = tempProfile,
+        size = size,
+        borderWidth = borderWidth,
+        borderColor = borderColor,
+        onClick = onClick,
+        modifier = modifier
+    )
 }

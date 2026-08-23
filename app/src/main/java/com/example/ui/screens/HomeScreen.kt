@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -67,6 +68,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -110,6 +112,7 @@ import com.example.auth.FriendUser
 import com.example.auth.FriendsViewModel
 import com.example.auth.UserProfile
 import com.example.auth.UserSearchResult
+import com.example.ui.components.FriendAvatar
 import com.example.ui.components.ProfileDialog
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.CyanAccent
@@ -427,42 +430,63 @@ fun HomeScreen(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .widthIn(max = 600.dp)
-                                        .padding(horizontal = 4.dp),
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "MY FRIENDS (${friends.size})",
+                                        text = "CONTACTS (${friends.size})",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = CyanGlow,
                                         letterSpacing = 1.sp
                                     )
                                     Text(
-                                        text = "Tap Call to start 1-on-1 video",
+                                        text = "Tap to start video call",
                                         fontSize = 11.sp,
                                         color = SlateTextMuted
                                     )
                                 }
                             }
 
-                            items(friends, key = { it.uid }) { friend ->
-                                FriendCard(
-                                    friend = friend,
-                                    onCallClick = {
-                                        checkAndRun {
-                                            if (userProfile != null) {
-                                                viewModel.startDirectCall(friend, userProfile!!)
-                                                onDirectCallFriend(friend)
-                                            } else {
-                                                Toast.makeText(context, "Please complete your profile first", Toast.LENGTH_SHORT).show()
+                            // WhatsApp-style compact list container
+                            item {
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .widthIn(max = 600.dp),
+                                    shape = RoundedCornerShape(18.dp),
+                                    colors = CardDefaults.cardColors(containerColor = SlateDark900),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+                                ) {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        friends.forEachIndexed { index, friend ->
+                                            FriendCard(
+                                                friend = friend,
+                                                onCallClick = {
+                                                    checkAndRun {
+                                                        if (userProfile != null) {
+                                                            viewModel.startDirectCall(friend, userProfile!!)
+                                                            onDirectCallFriend(friend)
+                                                        } else {
+                                                            Toast.makeText(context, "Please complete your profile first", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    }
+                                                },
+                                                onUnfriendClick = {
+                                                    friendsViewModel?.removeFriend(friend.uid, friend.displayName)
+                                                }
+                                            )
+                                            if (index < friends.size - 1) {
+                                                HorizontalDivider(
+                                                    modifier = Modifier.padding(start = 72.dp, end = 16.dp),
+                                                    color = SlateDark800,
+                                                    thickness = 0.8.dp
+                                                )
                                             }
                                         }
-                                    },
-                                    onUnfriendClick = {
-                                        friendsViewModel?.removeFriend(friend.uid, friend.displayName)
                                     }
-                                )
+                                }
                             }
                         }
                     }
@@ -1173,192 +1197,182 @@ private fun FriendCard(
     val context = LocalContext.current
     var showMenu by remember { mutableStateOf(false) }
 
-    val decodedBitmap = remember(friend.avatarBase64) {
-        if (!friend.avatarBase64.isNullOrBlank()) {
-            try {
-                val bytes = Base64.decode(friend.avatarBase64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            } catch (e: Exception) {
-                null
-            }
-        } else null
-    }
-
-    Card(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .widthIn(max = 600.dp)
+            .clickable { onCallClick() }
+            .padding(horizontal = 16.dp, vertical = 10.dp)
             .testTag("friend_card_${friend.username}"),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = SlateDark900),
-        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
     ) {
+        // Left: Avatar + Online Badge + Name & Username
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.weight(1f)
         ) {
-            // Avatar + Online Dot + User Info
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(modifier = Modifier.size(52.dp)) {
+            Box(modifier = Modifier.size(48.dp)) {
+                FriendAvatar(
+                    friend = friend,
+                    size = 48.dp,
+                    borderWidth = if (friend.isOnline) 2.dp else 1.dp,
+                    borderColor = if (friend.isOnline) EmeraldGlow else GlassDarkBorder
+                )
+
+                // Online indicator dot
+                if (friend.isOnline) {
                     Box(
                         modifier = Modifier
-                            .size(52.dp)
+                            .size(13.dp)
                             .clip(CircleShape)
-                            .border(1.5.dp, if (friend.isOnline) EmeraldGlow else GlassDarkBorder, CircleShape)
-                            .background(SlateDark800),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        when {
-                            decodedBitmap != null -> {
-                                Image(
-                                    bitmap = decodedBitmap.asImageBitmap(),
-                                    contentDescription = "Avatar",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                            !friend.photoUrl.isNullOrBlank() -> {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(friend.photoUrl)
-                                        .crossfade(true)
-                                        .build(),
-                                    contentDescription = "Avatar",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                            else -> {
-                                val initial = friend.displayName.firstOrNull()?.uppercaseChar()
-                                    ?: friend.username.firstOrNull()?.uppercaseChar()
-                                    ?: '?'
-                                Text(
-                                    text = initial.toString(),
-                                    color = SlateTextPrimary,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
+                            .background(EmeraldConnected)
+                            .border(2.dp, SlateDark900, CircleShape)
+                            .align(Alignment.BottomEnd)
+                    )
+                }
+            }
 
-                    // Online green badge dot
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = friend.displayName.ifBlank { "@${friend.username}".ifBlank { "User" } },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = SlateTextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     if (friend.isOnline) {
                         Box(
                             modifier = Modifier
-                                .size(14.dp)
+                                .size(6.dp)
                                 .clip(CircleShape)
                                 .background(EmeraldConnected)
-                                .border(2.dp, SlateDark900, CircleShape)
-                                .align(Alignment.BottomEnd)
+                        )
+                        Text(
+                            text = "Online",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = EmeraldConnected
+                        )
+                        Text(
+                            text = "•",
+                            fontSize = 11.sp,
+                            color = SlateTextMuted
                         )
                     }
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = friend.displayName.ifBlank { "User" },
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = SlateTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
                     Text(
                         text = "@${friend.username}",
                         fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = CyanGlow,
+                        color = SlateTextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = if (friend.isOnline) "Active now" else "Offline",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (friend.isOnline) EmeraldConnected else SlateTextMuted
-                    )
                 }
             }
+        }
 
-            // Action: Video Call Button + Overflow
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+        // Right: WhatsApp-style Call & Options Buttons
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            // Video Call Button (WhatsApp style with gradient accent)
+            IconButton(
+                onClick = onCallClick,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            listOf(CyanAccent.copy(alpha = 0.2f), IndigoAccent.copy(alpha = 0.2f))
+                        )
+                    )
+                    .border(1.dp, CyanGlow.copy(alpha = 0.4f), CircleShape)
+                    .testTag("call_friend_button_${friend.username}")
             ) {
-                Button(
-                    onClick = onCallClick,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    modifier = Modifier
-                        .height(40.dp)
-                        .testTag("call_friend_button_${friend.username}")
+                Icon(
+                    imageVector = Icons.Default.Videocam,
+                    contentDescription = "Video Call",
+                    tint = CyanGlow,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            // More Options (Unfriend / Copy)
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(36.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.horizontalGradient(listOf(IndigoAccent, CyanAccent)),
-                                RoundedCornerShape(12.dp)
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Videocam,
-                                contentDescription = "Call",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "Call",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Options",
+                        tint = SlateTextMuted,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
 
-                Box {
-                    IconButton(
-                        onClick = { showMenu = true },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Options",
-                            tint = SlateTextMuted,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false },
-                        modifier = Modifier.background(SlateDark900)
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Unfriend", color = RoseDestructive) },
-                            onClick = {
-                                showMenu = false
-                                onUnfriendClick()
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    modifier = Modifier.background(SlateDark900)
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.Videocam, contentDescription = null, tint = CyanGlow, modifier = Modifier.size(18.dp))
+                                Text("Start Video Call", color = SlateTextPrimary)
                             }
-                        )
-                    }
+                        },
+                        onClick = {
+                            showMenu = false
+                            onCallClick()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.Share, contentDescription = null, tint = SlateTextSecondary, modifier = Modifier.size(18.dp))
+                                Text("Copy Username", color = SlateTextPrimary)
+                            }
+                        },
+                        onClick = {
+                            showMenu = false
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Username", "@${friend.username}"))
+                            Toast.makeText(context, "Copied @${friend.username}", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = null, tint = RoseDestructive, modifier = Modifier.size(18.dp))
+                                Text("Unfriend", color = RoseDestructive)
+                            }
+                        },
+                        onClick = {
+                            showMenu = false
+                            onUnfriendClick()
+                        }
+                    )
                 }
             }
         }
