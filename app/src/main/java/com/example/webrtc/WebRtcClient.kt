@@ -615,16 +615,31 @@ class WebRtcClient(private val context: Context) {
                         }
                         "inbound-rtp" -> {
                             val kind = stats.members["kind"] as? String ?: stats.members["mediaType"] as? String
+                            val pLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
+                            val jit = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
+
                             if (kind == "video") {
                                 inFps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: inFps
                                 inBytes = (stats.members["bytesReceived"] as? Number)?.toLong() ?: inBytes
                                 inWidth = (stats.members["frameWidth"] as? Number)?.toInt() ?: inWidth
                                 inHeight = (stats.members["frameHeight"] as? Number)?.toInt() ?: inHeight
-                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: packetsLost
-                                jitterSec = (stats.members["jitter"] as? Number)?.toDouble() ?: jitterSec
+                                packetsLost += pLost
+                                if (jit > jitterSec) {
+                                    jitterSec = jit
+                                }
                                 framesDecoded = (stats.members["framesDecoded"] as? Number)?.toLong() ?: framesDecoded
                                 framesDropped = (stats.members["framesDropped"] as? Number)?.toLong() ?: framesDropped
                                 inCodecId = stats.members["codecId"] as? String
+                            } else if (kind == "audio") {
+                                packetsLost += pLost
+                                if (jitterSec == 0.0 || (jit > 0.0 && jit > jitterSec)) {
+                                    jitterSec = jit
+                                }
+                            } else {
+                                packetsLost += pLost
+                                if (jit > jitterSec) {
+                                    jitterSec = jit
+                                }
                             }
                         }
                         "outbound-rtp" -> {

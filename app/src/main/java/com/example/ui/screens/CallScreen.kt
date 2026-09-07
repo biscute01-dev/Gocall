@@ -1185,6 +1185,32 @@ fun LiveStatsHud(
                     )
                 }
             }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Jitter:", fontSize = 11.sp, color = SlateTextSecondary)
+                Text(
+                    String.format(Locale.US, "%.1f ms", stats.jitterMs),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = if (stats.jitterMs < 30) EmeraldGlow else AmberWarning
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Packet Loss:", fontSize = 11.sp, color = SlateTextSecondary)
+                Text(
+                    "${stats.packetsLost}",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = if (stats.packetsLost == 0L) EmeraldGlow else RoseDestructive
+                )
+            }
         }
     }
 }
