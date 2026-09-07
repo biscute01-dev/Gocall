@@ -2,8 +2,6 @@ name: Build APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
   build:
@@ -26,25 +24,16 @@ jobs:
 
       - name: Generate debug keystore
         run: |
-          mkdir -p ~/.android
-
           keytool -genkeypair \
-            -keystore ~/.android/debug.keystore \
+            -v \
+            -keystore debug.keystore \
             -alias androiddebugkey \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
             -storepass android \
             -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US" \
-            -noprompt
-
-          echo "===== SHA-1 ====="
-
-          keytool -list -v \
-            -keystore ~/.android/debug.keystore \
-            -alias androiddebugkey \
-            -storepass android | grep "SHA1:"
+            -dname "CN=Android Debug,O=Android,C=US"
 
       - name: Build APK
         run: gradle assembleDebug
@@ -57,4 +46,4 @@ jobs:
         with:
           name: Gocall-debug
           path: '**/build/outputs/apk/debug/*.apk'
-          if-no-files-found: error
+          if-no-files-found: error￼Enter
