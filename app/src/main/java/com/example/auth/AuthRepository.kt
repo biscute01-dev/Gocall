@@ -371,16 +371,25 @@ class AuthRepository(
 
     private fun syncFcmToken(uid: String) {
         try {
+            val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+            val resultCode = availability.isGooglePlayServicesAvailable(context)
+            if (resultCode != com.google.android.gms.common.ConnectionResult.SUCCESS) {
+                Log.d(TAG, "Google Play Services not available for FCM registration (code: $resultCode), relying on Realtime Database signaling")
+                return
+            }
+
             FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
                 if (task.isSuccessful) {
                     val token = task.result
                     if (!token.isNullOrBlank()) {
                         database.getReference(NODE_USERS).child(uid).child("fcmToken").setValue(token)
                     }
+                } else {
+                    Log.d(TAG, "FCM token not available: ${task.exception?.message}")
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to retrieve FCM token: ${e.message}")
+        } catch (e: Throwable) {
+            Log.d(TAG, "FCM token sync bypassed: ${e.message}")
         }
     }
 }

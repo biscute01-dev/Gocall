@@ -33,6 +33,17 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
+        <!-- Disable automatic Firebase Messaging registration retry which causes fatal log errors without Play Services / FCM setup -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
+        <meta-data
+            android:name="firebase_analytics_collection_deactivated"
+            android:value="true" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="incoming_calls_channel" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

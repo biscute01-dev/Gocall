@@ -253,11 +253,10 @@ class WebRtcClient(private val context: Context) {
             iceCandidatePoolSize = 10
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-            enableDscp = true // Expedited Forwarding (DSCP 46) for audio & video packets
+            enableDscp = true // Expedited Forwarding (DSCP 46) for audio packets
             bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
             rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
             tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
-            enableCpuOveruseDetection = false // Prevents abrupt CPU throttling frame drops
         }
 
         peerConnection = factory.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
@@ -353,32 +352,6 @@ class WebRtcClient(private val context: Context) {
         localVideoTrack?.let {
             pc.addTrack(it, listOf("ARDAMS"))
         }
-        applyOptimalVideoSenderParameters()
-    }
-
-    fun applyOptimalVideoSenderParameters() {
-        val pc = peerConnection ?: return
-        try {
-            for (sender in pc.senders) {
-                val track = sender.track()
-                if (track is VideoTrack || sender.parameters.encodings.isNotEmpty()) {
-                    val params = sender.parameters
-                    params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
-                    for (encoding in params.encodings) {
-                        encoding.minBitrateBps = 600_000 // 600 kbps min floor to prevent compression stalls
-                        encoding.maxBitrateBps = 3_000_000 // 3.0 Mbps high quality 720p 30fps
-                        encoding.maxFramerate = VIDEO_FPS
-                        encoding.scaleResolutionDownBy = 1.0
-                        encoding.active = true
-                        encoding.networkPriority = 1
-                    }
-                    sender.parameters = params
-                    Log.d(TAG, "Applied MAINTAIN_FRAMERATE degradation and optimal bitrates to video sender")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error configuring video sender parameters: ${e.message}")
-        }
     }
 
     fun createOffer(onSdpCreated: (SessionDescription) -> Unit, iceRestart: Boolean = false) {
@@ -394,12 +367,11 @@ class WebRtcClient(private val context: Context) {
             override fun onCreateSuccess(desc: SessionDescription) {
                 val optimizedDesc = SessionDescription(
                     desc.type,
-                    optimizeSdpForUltraSmoothVideoAndAudio(desc.description)
+                    optimizeSdpForUltraLowLatencyAudio(desc.description)
                 )
                 peerConnection?.setLocalDescription(object : SdpObserver {
                     override fun onCreateSuccess(p0: SessionDescription?) {}
                     override fun onSetSuccess() {
-                        applyOptimalVideoSenderParameters()
                         onSdpCreated(optimizedDesc)
                     }
                     override fun onCreateFailure(err: String?) {
@@ -430,12 +402,11 @@ class WebRtcClient(private val context: Context) {
             override fun onCreateSuccess(desc: SessionDescription) {
                 val optimizedDesc = SessionDescription(
                     desc.type,
-                    optimizeSdpForUltraSmoothVideoAndAudio(desc.description)
+                    optimizeSdpForUltraLowLatencyAudio(desc.description)
                 )
                 peerConnection?.setLocalDescription(object : SdpObserver {
                     override fun onCreateSuccess(p0: SessionDescription?) {}
                     override fun onSetSuccess() {
-                        applyOptimalVideoSenderParameters()
                         onSdpCreated(optimizedDesc)
                     }
                     override fun onCreateFailure(err: String?) {
@@ -457,13 +428,12 @@ class WebRtcClient(private val context: Context) {
     }
 
     fun setRemoteDescription(sdp: String, type: SessionDescription.Type, onSetSuccess: () -> Unit = {}) {
-        val optimizedSdp = optimizeSdpForUltraSmoothVideoAndAudio(sdp)
+        val optimizedSdp = optimizeSdpForUltraLowLatencyAudio(sdp)
         val sdpDesc = SessionDescription(type, optimizedSdp)
         peerConnection?.setRemoteDescription(object : SdpObserver {
             override fun onCreateSuccess(p0: SessionDescription?) {}
             override fun onSetSuccess() {
                 Log.d(TAG, "setRemoteDescription success ($type)")
-                applyOptimalVideoSenderParameters()
                 onSetSuccess()
             }
             override fun onCreateFailure(err: String?) {
@@ -476,11 +446,10 @@ class WebRtcClient(private val context: Context) {
         }, sdpDesc)
     }
 
-    private fun optimizeSdpForUltraSmoothVideoAndAudio(sdp: String): String {
+    private fun optimizeSdpForUltraLowLatencyAudio(sdp: String): String {
         try {
             val lines = sdp.split("\r\n", "\n").toMutableList()
             var opusPayloadType: String? = null
-            val videoPayloadTypes = mutableListOf<String>()
 
             // 1. Locate Opus audio payload type (usually 111)
             for (line in lines) {
@@ -497,18 +466,7 @@ class WebRtcClient(private val context: Context) {
                 opusPayloadType = "111"
             }
 
-            // 2. Identify video payload types (H264, VP8, VP9)
-            for (line in lines) {
-                if (line.startsWith("a=rtpmap:") && (line.contains("H264", ignoreCase = true) || line.contains("VP8", ignoreCase = true) || line.contains("VP9", ignoreCase = true))) {
-                    val pt = line.substringAfter("a=rtpmap:").substringBefore(" ").trim()
-                    if (pt.isNotBlank() && !videoPayloadTypes.contains(pt)) {
-                        videoPayloadTypes.add(pt)
-                    }
-                }
-            }
-
-            // 3. Ultra low-latency & smoothed audio parameters:
-            val lowLatencyAudioParams = "minptime=10;ptime=20;maxaveragebitrate=32000;useinbandfec=1;usedtx=1;stereo=0;sprop-stereo=0;cbr=1"
+            val lowLatencyParams = "minptime=10;ptime=10;maxaveragebitrate=32000;useinbandfec=1;usedtx=1;stereo=0;sprop-stereo=0;cbr=0"
 
             var fmtpFound = false
             for (i in lines.indices) {
@@ -523,15 +481,15 @@ class WebRtcClient(private val context: Context) {
                         }
                     }
 
-                    // Enforce low latency voice settings with smooth pacing
+                    // Enforce low latency voice settings
                     paramMap["minptime"] = "10"
-                    paramMap["ptime"] = "20"
+                    paramMap["ptime"] = "10"
                     paramMap["maxaveragebitrate"] = "32000"
                     paramMap["useinbandfec"] = "1"
                     paramMap["usedtx"] = "1"
                     paramMap["stereo"] = "0"
                     paramMap["sprop-stereo"] = "0"
-                    paramMap["cbr"] = "1"
+                    paramMap["cbr"] = "0"
 
                     val merged = paramMap.entries.joinToString(";") { "${it.key}=${it.value}" }
                     lines[i] = "a=fmtp:$opusPayloadType $merged"
@@ -543,52 +501,13 @@ class WebRtcClient(private val context: Context) {
             if (!fmtpFound) {
                 for (i in lines.indices) {
                     if (lines[i].startsWith("a=rtpmap:$opusPayloadType")) {
-                        lines.add(i + 1, "a=fmtp:$opusPayloadType $lowLatencyAudioParams")
+                        lines.add(i + 1, "a=fmtp:$opusPayloadType $lowLatencyParams")
                         break
                     }
                 }
             }
 
-            // 4. Video bandwidth allocation & smooth pacing
-            var inVideoSection = false
-            val newLines = mutableListOf<String>()
-            for (i in lines.indices) {
-                val line = lines[i]
-                if (line.startsWith("m=video")) {
-                    inVideoSection = true
-                    newLines.add(line)
-                    // Insert dedicated video bandwidth parameters
-                    newLines.add("b=AS:3000")
-                    newLines.add("b=TIAS:3000000")
-                    continue
-                } else if (line.startsWith("m=audio") || line.startsWith("m=application")) {
-                    inVideoSection = false
-                }
-
-                if (inVideoSection && (line.startsWith("b=AS:") || line.startsWith("b=TIAS:"))) {
-                    // Skip old bandwidth line to avoid duplicates
-                    continue
-                }
-
-                // In video section, enhance video fmtp parameters with smooth bitrate hints
-                if (inVideoSection && line.startsWith("a=fmtp:")) {
-                    val pt = line.substringAfter("a=fmtp:").substringBefore(" ").trim()
-                    if (videoPayloadTypes.contains(pt) || pt.toIntOrNull() != null) {
-                        val existing = line.substringAfter(" ").trim()
-                        var enhanced = existing
-                        if (!enhanced.contains("x-google-min-bitrate")) {
-                            enhanced = if (enhanced.isNotBlank()) "$enhanced;x-google-min-bitrate=800;x-google-start-bitrate=1800;x-google-max-bitrate=3000"
-                            else "x-google-min-bitrate=800;x-google-start-bitrate=1800;x-google-max-bitrate=3000"
-                        }
-                        newLines.add("a=fmtp:$pt $enhanced")
-                        continue
-                    }
-                }
-
-                newLines.add(line)
-            }
-
-            return newLines.joinToString("\r\n")
+            return lines.joinToString("\r\n")
         } catch (e: Exception) {
             Log.e(TAG, "Error optimizing SDP: ${e.message}")
             return sdp

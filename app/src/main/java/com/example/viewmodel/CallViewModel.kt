@@ -161,6 +161,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var durationTimerJob: Job? = null
     private var statsPollingJob: Job? = null
     private var reconnectJob: Job? = null
+    private var disconnectDebounceJob: Job? = null
     private var localCandidates = 0
     private var remoteCandidates = 0
     private var reconnectAttempts = 0
@@ -477,19 +478,31 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 when (event.state) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
+                        disconnectDebounceJob?.cancel()
                         val roomId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
-                        _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
+                        if (_callState.value !is CallState.Connected) {
+                            _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
+                        }
                         startDurationTimer()
                         startStatsPolling()
                     }
                     PeerConnection.IceConnectionState.DISCONNECTED -> {
-                        triggerReconnection("ICE Disconnected")
+                        // Debounce transient ICE disconnects (4 seconds) before displaying reconnecting state
+                        disconnectDebounceJob?.cancel()
+                        disconnectDebounceJob = viewModelScope.launch {
+                            delay(4000)
+                            if (isActive && _callState.value is CallState.Connected) {
+                                triggerReconnection("ICE Disconnected")
+                            }
+                        }
                     }
                     PeerConnection.IceConnectionState.FAILED -> {
+                        disconnectDebounceJob?.cancel()
                         triggerReconnection("ICE Failed - Network Drop")
                     }
                     PeerConnection.IceConnectionState.CLOSED -> {
+                        disconnectDebounceJob?.cancel()
                         stopDurationTimer()
                     }
                     else -> {}
@@ -499,14 +512,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 updateStats()
                 when (event.state) {
                     PeerConnection.PeerConnectionState.CONNECTED -> {
+                        disconnectDebounceJob?.cancel()
                         val roomId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
-                        _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
+                        if (_callState.value !is CallState.Connected) {
+                            _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
+                        }
                         startDurationTimer()
                     }
-                    PeerConnection.PeerConnectionState.DISCONNECTED,
+                    PeerConnection.PeerConnectionState.DISCONNECTED -> {
+                        disconnectDebounceJob?.cancel()
+                        disconnectDebounceJob = viewModelScope.launch {
+                            delay(4000)
+                            if (isActive && _callState.value is CallState.Connected) {
+                                triggerReconnection("Peer Connection Dropped")
+                            }
+                        }
+                    }
                     PeerConnection.PeerConnectionState.FAILED -> {
-                        triggerReconnection("Peer Connection Dropped")
+                        disconnectDebounceJob?.cancel()
+                        triggerReconnection("Peer Connection Failed")
                     }
                     else -> {}
                 }

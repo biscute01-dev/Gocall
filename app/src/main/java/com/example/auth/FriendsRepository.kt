@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import com.example.notification.NotificationHelper
 
 class FriendsRepository(
     private val context: Context,
@@ -526,17 +527,24 @@ class FriendsRepository(
                     if (call != null && call.status == "ringing") {
                         // Check if not expired (within 60 seconds)
                         if (System.currentTimeMillis() - call.timestamp < 60000) {
+                            val previousCall = _incomingCall.value
                             _incomingCall.value = call
+                            if (previousCall?.callId != call.callId) {
+                                NotificationHelper.showIncomingCallNotification(context, call)
+                            }
                         } else {
                             // Call timed out, clear it
                             ref.setValue(null)
                             _incomingCall.value = null
+                            NotificationHelper.cancelIncomingCallNotification(context)
                         }
                     } else {
                         _incomingCall.value = null
+                        NotificationHelper.cancelIncomingCallNotification(context)
                     }
                 } else {
                     _incomingCall.value = null
+                    NotificationHelper.cancelIncomingCallNotification(context)
                 }
             }
 
@@ -555,6 +563,7 @@ class FriendsRepository(
         activeIncomingCallListener = null
         activeIncomingCallRef = null
         _incomingCall.value = null
+        NotificationHelper.cancelIncomingCallNotification(context)
     }
 
     /**
