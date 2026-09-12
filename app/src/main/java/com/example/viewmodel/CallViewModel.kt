@@ -51,7 +51,6 @@ sealed class CallState {
         val roomId: String,
         val attempt: Int,
         val reason: String,
-        val mode: ReconnectMode = ReconnectMode.RESUME,
         val maxAttempts: Int = 30
     ) : CallState()
     data class Ended(val reason: String) : CallState()
@@ -177,6 +176,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var localCandidates = 0
     private var remoteCandidates = 0
     private var reconnectAttempts = 0
+    private var hasReconnectedOnce = false
     private val reconnectPolicy: ReconnectPolicy = DefaultReconnectPolicy()
 
     init {
@@ -369,6 +369,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
+        hasReconnectedOnce = false
         saveRecentRoom(cleanId)
         _isRemoteCameraEnabled.value = true
         _isRemoteMicEnabled.value = true
@@ -401,6 +402,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
+        hasReconnectedOnce = false
         saveRecentRoom(cleanId)
         _isRemoteCameraEnabled.value = true
         _isRemoteMicEnabled.value = true
@@ -468,13 +470,20 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     reconnectAttempts++
                     val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
                     updateStats()
-                    _callState.value = CallState.Reconnecting(
-                        roomId = roomId,
-                        attempt = reconnectAttempts,
-                        reason = "Caller initiated reconnect",
-                        mode = mode,
-                        maxAttempts = 30
-                    )
+                    // If mode is FULL_RECONNECT, flip state to Reconnecting (guarded by hasReconnectedOnce).
+                    // Resume is silent to the UI.
+                    if (mode == ReconnectMode.FULL_RECONNECT) {
+                        _remoteVideoTrack.value = null
+                        if (!hasReconnectedOnce) {
+                            hasReconnectedOnce = true
+                            _callState.value = CallState.Reconnecting(
+                                roomId = roomId,
+                                attempt = reconnectAttempts,
+                                reason = "Caller initiated full reconnect",
+                                maxAttempts = 30
+                            )
+                        }
+                    }
                 }
             }
             is SignalingEvent.Error -> {
@@ -505,6 +514,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         val roomId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
                         reconnectAttempts = 0
+                        hasReconnectedOnce = false
                         if (_callState.value !is CallState.Connected) {
                             _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
                         }
@@ -540,6 +550,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         val roomId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
                         reconnectAttempts = 0
+                        hasReconnectedOnce = false
                         if (_callState.value !is CallState.Connected) {
                             _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
                         }
@@ -575,13 +586,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         reconnectAttempts++
         val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
         updateStats()
-        _callState.value = CallState.Reconnecting(
-            roomId = roomId,
-            attempt = reconnectAttempts,
-            reason = reason,
-            mode = mode,
-            maxAttempts = 30
-        )
+
+        // Room.state flips to RECONNECTING only when resume has failed and engine escalates to full reconnect.
+        // Fast resume is silent to the UI (participants, tracks, and room state remain intact).
+        // hasReconnectedOnce gate ensures Reconnecting state fires once for the whole full-reconnect retry sequence.
+        if (mode == ReconnectMode.FULL_RECONNECT) {
+            _remoteVideoTrack.value = null // In full reconnect, remote participants/tracks disconnect
+            if (!hasReconnectedOnce) {
+                hasReconnectedOnce = true
+                _callState.value = CallState.Reconnecting(
+                    roomId = roomId,
+                    attempt = reconnectAttempts,
+                    reason = reason,
+                    maxAttempts = 30
+                )
+            }
+        }
 
         reconnectJob?.cancel()
         reconnectJob = viewModelScope.launch {
@@ -607,12 +627,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(TAG, "Executing $mode reconnect attempt #$reconnectAttempts (Backoff: ${delayDuration.inWholeMilliseconds}ms, Reason: $reason)")
             delay(delayDuration.inWholeMilliseconds)
 
-            if (!isActive || _callState.value !is CallState.Reconnecting) return@launch
+            if (!isActive) return@launch
+            // If we escalated to FULL_RECONNECT, ensure we haven't transitioned to Ended or Error
+            if (mode == ReconnectMode.FULL_RECONNECT && _callState.value !is CallState.Reconnecting) return@launch
 
             when (mode) {
                 ReconnectMode.RESUME -> {
-                    // Fast path: Keep media tracks & WebSockets intact, restart ICE
-                    Log.d(TAG, "Triggering Fast Resume (ICE restart)")
+                    // Fast path: Silent to UI. Keep media tracks, audio session, and participants untouched. Restart ICE.
+                    Log.d(TAG, "Triggering Fast Resume (ICE restart, silent to UI)")
                     if (_isCaller.value) {
                         webRtcClient?.restartIce { sdpOffer ->
                             Log.d(TAG, "Generated Fast Resume ICE Restart Offer SDP")
@@ -624,7 +646,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 ReconnectMode.FULL_RECONNECT -> {
                     // Fallback path: Tear down PeerConnection, rebuild from scratch, republish tracks
-                    Log.d(TAG, "Triggering Full Reconnect (rebuilding PeerConnection)")
+                    Log.d(TAG, "Triggering Full Reconnect (rebuilding PeerConnection & republishing tracks)")
                     localCandidates = 0
                     remoteCandidates = 0
                     webRtcClient?.rebuildPeerConnection(isCaller = _isCaller.value) { sdpOffer ->
@@ -639,7 +661,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
             // Fallback watchdog retry if still not connected after 8 seconds
             delay(8000)
-            if (_callState.value is CallState.Reconnecting && isActive) {
+            if (isActive && (_callState.value is CallState.Reconnecting || (_callState.value is CallState.Connected && mode == ReconnectMode.RESUME))) {
+                // If still not stable connected
                 if (reconnectAttempts < 30) {
                     val nextMode = if (reconnectAttempts + 1 <= 3) "Resume" else "Full Reconnect"
                     triggerReconnection("$nextMode retry #${reconnectAttempts + 1}")
@@ -837,6 +860,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         webRtcClient = null
 
         audioManager.stop()
+        hasReconnectedOnce = false
 
         _callState.value = CallState.Ended("Call ended")
         _callDurationSeconds.value = 0

@@ -286,10 +286,9 @@ fun CallScreen(
 
             // Only display interactive UI controls and HUDs when NOT in PiP mode
             if (!isInPipMode) {
-                // 2. Reconnecting Top Banner (when in reconnecting state during call)
+                // 2. Reconnecting Top Banner (fired once on Full Reconnect escalation; Resume is silent)
                 if (callState is CallState.Reconnecting) {
                     val reconState = callState as CallState.Reconnecting
-                    val isResume = reconState.mode == ReconnectMode.RESUME
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -299,7 +298,7 @@ fun CallScreen(
                     ) {
                         Card(
                             shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = if (isResume) AmberWarning.copy(alpha = 0.95f) else RoseDestructive.copy(alpha = 0.95f)),
+                            colors = CardDefaults.cardColors(containerColor = RoseDestructive.copy(alpha = 0.95f)),
                             border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.4f))
                         ) {
                             Row(
@@ -314,13 +313,13 @@ fun CallScreen(
                                 )
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = if (isResume) "Reconnecting • Fast Resume (#${reconState.attempt}/${reconState.maxAttempts})" else "Reconnecting • Full Reconnect (#${reconState.attempt}/${reconState.maxAttempts})",
+                                        text = "Reconnecting • Full Reconnect (#${reconState.attempt}/${reconState.maxAttempts})",
                                         color = Color.White,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp
                                     )
                                     Text(
-                                        text = if (isResume) "Restarting ICE stream (tracks preserved)" else "Rebuilding WebRTC peer connection...",
+                                        text = "Rebuilding WebRTC peer connection...",
                                         color = Color.White.copy(alpha = 0.85f),
                                         fontSize = 11.sp
                                     )
@@ -1476,8 +1475,7 @@ private fun ReconnectingOverlay(
     state: CallState.Reconnecting,
     onForceReconnect: () -> Unit
 ) {
-    val isResume = state.mode == ReconnectMode.RESUME
-    val indicatorColor = if (isResume) AmberWarning else RoseDestructive
+    val indicatorColor = RoseDestructive
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1501,16 +1499,13 @@ private fun ReconnectingOverlay(
 
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                text = if (isResume) "Reconnecting • Fast Resume" else "Reconnecting • Full Reconnect",
+                text = "Reconnecting • Full Reconnect",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = SlateTextPrimary
             )
             Text(
-                text = if (isResume)
-                    "Attempting Fast Resume #${state.attempt}/${state.maxAttempts} (${state.reason})"
-                else
-                    "Rebuilding peer connection #${state.attempt}/${state.maxAttempts} (${state.reason})",
+                text = "Rebuilding peer connection #${state.attempt}/${state.maxAttempts} (${state.reason})",
                 fontSize = 13.sp,
                 color = SlateTextSecondary,
                 textAlign = TextAlign.Center
