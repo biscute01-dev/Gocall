@@ -59,7 +59,8 @@ data class WebRtcLiveStats(
     val isCaller: Boolean = false,
     val localCandidatesCount: Int = 0,
     val remoteCandidatesCount: Int = 0,
-    val reconnectCount: Int = 0
+    val reconnectCount: Int = 0,
+    val reconnectStrategy: String = "Normal"
 )
 
 sealed class WebRtcEvent {
@@ -519,8 +520,34 @@ class WebRtcClient(private val context: Context) {
     }
 
     fun restartIce(onSdpCreated: (SessionDescription) -> Unit) {
-        Log.d(TAG, "Initiating ICE Restart for reconnection...")
+        Log.d(TAG, "Initiating ICE Restart (Fast Resume) for reconnection...")
         createOffer(onSdpCreated, iceRestart = true)
+    }
+
+    /**
+     * Fallback Full Reconnect:
+     * Tears down the stale PeerConnection cleanly, rebuilds it from scratch,
+     * re-attaches existing local media tracks (without interrupting camera or mic hardware capture),
+     * and triggers a fresh WebRTC negotiation cycle.
+     */
+    fun rebuildPeerConnection(isCaller: Boolean, onSdpCreated: (SessionDescription) -> Unit = {}) {
+        Log.d(TAG, "Rebuilding PeerConnection from scratch (Full Reconnect Fallback)...")
+        try {
+            peerConnection?.close()
+            peerConnection?.dispose()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error disposing previous peer connection: ${e.message}")
+        }
+        peerConnection = null
+        _iceConnectionState.value = PeerConnection.IceConnectionState.NEW
+        _connectionState.value = PeerConnection.PeerConnectionState.NEW
+
+        // Create fresh PeerConnection and re-attach existing tracks
+        createPeerConnection()
+
+        if (isCaller) {
+            createOffer(onSdpCreated, iceRestart = false)
+        }
     }
 
     fun toggleMicrophone(enabled: Boolean? = null): Boolean {

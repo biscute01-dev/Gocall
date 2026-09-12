@@ -31,6 +31,11 @@ import org.webrtc.VideoTrack
 import com.example.webrtc.WebRtcLiveStats
 import com.example.webrtc.record.RemoteCallRecorder
 import com.example.webrtc.record.RecordingStatus
+import com.example.webrtc.reconnect.DefaultReconnectPolicy
+import com.example.webrtc.reconnect.DisconnectReason
+import com.example.webrtc.reconnect.ReconnectContext
+import com.example.webrtc.reconnect.ReconnectMode
+import com.example.webrtc.reconnect.ReconnectPolicy
 import java.io.File
 import android.net.Uri
 import android.content.Intent
@@ -42,7 +47,13 @@ sealed class CallState {
     data class WaitingForPeer(val roomId: String) : CallState()
     data class JoiningCall(val roomId: String) : CallState()
     data class Connected(val roomId: String, val durationSeconds: Long = 0) : CallState()
-    data class Reconnecting(val roomId: String, val attempt: Int, val reason: String) : CallState()
+    data class Reconnecting(
+        val roomId: String,
+        val attempt: Int,
+        val reason: String,
+        val mode: ReconnectMode = ReconnectMode.RESUME,
+        val maxAttempts: Int = 30
+    ) : CallState()
     data class Ended(val reason: String) : CallState()
     data class Error(val message: String) : CallState()
 }
@@ -53,7 +64,8 @@ data class CallUiStats(
     val isCaller: Boolean = false,
     val localCandidatesCount: Int = 0,
     val remoteCandidatesCount: Int = 0,
-    val reconnectCount: Int = 0
+    val reconnectCount: Int = 0,
+    val reconnectMode: String = "RESUME"
 )
 
 class CallViewModel(application: Application) : AndroidViewModel(application) {
@@ -165,6 +177,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var localCandidates = 0
     private var remoteCandidates = 0
     private var reconnectAttempts = 0
+    private val reconnectPolicy: ReconnectPolicy = DefaultReconnectPolicy()
 
     init {
         activeInstance = this
@@ -449,9 +462,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 _isRemoteMicEnabled.value = event.isMicEnabled
             }
             is SignalingEvent.ReconnectRequested -> {
-                Log.d(TAG, "Peer requested reconnection...")
+                Log.d(TAG, "Peer requested reconnection (strategy renegotiation)...")
+                val roomId = _currentRoomId.value ?: return
                 if (!_isCaller.value) {
-                    // Callee prepares for new answer when caller restarts ICE
+                    reconnectAttempts++
+                    val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
+                    updateStats()
+                    _callState.value = CallState.Reconnecting(
+                        roomId = roomId,
+                        attempt = reconnectAttempts,
+                        reason = "Caller initiated reconnect",
+                        mode = mode,
+                        maxAttempts = 30
+                    )
                 }
             }
             is SignalingEvent.Error -> {
@@ -481,6 +504,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         disconnectDebounceJob?.cancel()
                         val roomId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
+                        reconnectAttempts = 0
                         if (_callState.value !is CallState.Connected) {
                             _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
                         }
@@ -515,6 +539,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         disconnectDebounceJob?.cancel()
                         val roomId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
+                        reconnectAttempts = 0
                         if (_callState.value !is CallState.Connected) {
                             _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
                         }
@@ -548,30 +573,78 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     fun triggerReconnection(reason: String) {
         val roomId = _currentRoomId.value ?: return
         reconnectAttempts++
+        val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
         updateStats()
-        _callState.value = CallState.Reconnecting(roomId, reconnectAttempts, reason)
+        _callState.value = CallState.Reconnecting(
+            roomId = roomId,
+            attempt = reconnectAttempts,
+            reason = reason,
+            mode = mode,
+            maxAttempts = 30
+        )
 
         reconnectJob?.cancel()
         reconnectJob = viewModelScope.launch {
-            Log.d(TAG, "Triggering automatic reconnection attempt #$reconnectAttempts (Reason: $reason)")
-            delay(1500) // Brief debounce for network switch
-
-            if (_isCaller.value) {
-                webRtcClient?.restartIce { sdpOffer ->
-                    Log.d(TAG, "Generated ICE Restart Offer SDP")
-                    signalingClient.sendReconnectOffer(sdpOffer.description)
-                }
-            } else {
-                signalingClient.updateStatus("reconnecting")
+            val context = ReconnectContext(
+                attemptIndex = reconnectAttempts,
+                retryCount = reconnectAttempts - 1,
+                mode = mode,
+                reason = when {
+                    reason.contains("ICE", ignoreCase = true) -> DisconnectReason.ICE_FAILED
+                    reason.contains("Peer", ignoreCase = true) -> DisconnectReason.PEER_CONNECTION_DISCONNECTED
+                    reason.contains("Manual", ignoreCase = true) -> DisconnectReason.MANUAL_TRIGGER
+                    else -> DisconnectReason.UNKNOWN
+                },
+                cumulativeElapsedTimeMs = 0L
+            )
+            val delayDuration = reconnectPolicy.getNextRetryDelay(context)
+            if (delayDuration == null) {
+                Log.w(TAG, "ReconnectPolicy hard cap reached (max 30 attempts). Reconnection aborted.")
+                _callState.value = CallState.Error("Connection lost after 30 reconnection attempts. Please rejoin.")
+                return@launch
             }
 
-            // Fallback retry if still disconnected after 10s
+            Log.d(TAG, "Executing $mode reconnect attempt #$reconnectAttempts (Backoff: ${delayDuration.inWholeMilliseconds}ms, Reason: $reason)")
+            delay(delayDuration.inWholeMilliseconds)
+
+            if (!isActive || _callState.value !is CallState.Reconnecting) return@launch
+
+            when (mode) {
+                ReconnectMode.RESUME -> {
+                    // Fast path: Keep media tracks & WebSockets intact, restart ICE
+                    Log.d(TAG, "Triggering Fast Resume (ICE restart)")
+                    if (_isCaller.value) {
+                        webRtcClient?.restartIce { sdpOffer ->
+                            Log.d(TAG, "Generated Fast Resume ICE Restart Offer SDP")
+                            signalingClient.sendReconnectOffer(sdpOffer.description)
+                        }
+                    } else {
+                        signalingClient.updateStatus("reconnecting")
+                    }
+                }
+                ReconnectMode.FULL_RECONNECT -> {
+                    // Fallback path: Tear down PeerConnection, rebuild from scratch, republish tracks
+                    Log.d(TAG, "Triggering Full Reconnect (rebuilding PeerConnection)")
+                    localCandidates = 0
+                    remoteCandidates = 0
+                    webRtcClient?.rebuildPeerConnection(isCaller = _isCaller.value) { sdpOffer ->
+                        Log.d(TAG, "Generated Full Reconnect Offer SDP")
+                        signalingClient.sendReconnectOffer(sdpOffer.description)
+                    }
+                    if (!_isCaller.value) {
+                        signalingClient.updateStatus("reconnecting")
+                    }
+                }
+            }
+
+            // Fallback watchdog retry if still not connected after 8 seconds
             delay(8000)
             if (_callState.value is CallState.Reconnecting && isActive) {
-                if (reconnectAttempts < 5) {
-                    triggerReconnection("Retry #$reconnectAttempts")
+                if (reconnectAttempts < 30) {
+                    val nextMode = if (reconnectAttempts + 1 <= 3) "Resume" else "Full Reconnect"
+                    triggerReconnection("$nextMode retry #${reconnectAttempts + 1}")
                 } else {
-                    _callState.value = CallState.Error("Connection lost after multiple reconnection attempts. Please rejoin.")
+                    _callState.value = CallState.Error("Connection lost after 30 reconnection attempts. Please rejoin.")
                 }
             }
         }
@@ -628,12 +701,20 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     fun fetchStatsNow() {
         val rtc = webRtcClient ?: return
+        val currentStrategy = if (reconnectAttempts == 0) {
+            "NONE"
+        } else if (reconnectAttempts <= 3) {
+            "RESUME"
+        } else {
+            "FULL_RECONNECT"
+        }
         rtc.fetchLiveStats { newStats ->
             _liveStats.value = newStats.copy(
                 isCaller = _isCaller.value,
                 localCandidatesCount = localCandidates,
                 remoteCandidatesCount = remoteCandidates,
-                reconnectCount = reconnectAttempts
+                reconnectCount = reconnectAttempts,
+                reconnectStrategy = currentStrategy
             )
             _stats.value = CallUiStats(
                 iceConnectionState = newStats.iceConnectionState,
@@ -641,20 +722,29 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 isCaller = _isCaller.value,
                 localCandidatesCount = localCandidates,
                 remoteCandidatesCount = remoteCandidates,
-                reconnectCount = reconnectAttempts
+                reconnectCount = reconnectAttempts,
+                reconnectMode = currentStrategy
             )
         }
     }
 
     private fun updateStats() {
         val rtc = webRtcClient
+        val currentStrategy = if (reconnectAttempts == 0) {
+            "NONE"
+        } else if (reconnectAttempts <= 3) {
+            "RESUME"
+        } else {
+            "FULL_RECONNECT"
+        }
         _stats.value = CallUiStats(
             iceConnectionState = rtc?.iceConnectionState?.value?.name ?: "UNKNOWN",
             connectionState = rtc?.connectionState?.value?.name ?: "UNKNOWN",
             isCaller = _isCaller.value,
             localCandidatesCount = localCandidates,
             remoteCandidatesCount = remoteCandidates,
-            reconnectCount = reconnectAttempts
+            reconnectCount = reconnectAttempts,
+            reconnectMode = currentStrategy
         )
     }
 

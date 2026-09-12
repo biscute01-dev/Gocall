@@ -135,6 +135,7 @@ import com.example.ui.webrtc.LocalVideoView
 import com.example.ui.webrtc.RemoteVideoView
 import com.example.viewmodel.CallState
 import com.example.viewmodel.CallViewModel
+import com.example.webrtc.reconnect.ReconnectMode
 import com.example.webrtc.WebRtcLiveStats
 import com.example.webrtc.record.RecordingStatus
 import java.io.File
@@ -288,6 +289,7 @@ fun CallScreen(
                 // 2. Reconnecting Top Banner (when in reconnecting state during call)
                 if (callState is CallState.Reconnecting) {
                     val reconState = callState as CallState.Reconnecting
+                    val isResume = reconState.mode == ReconnectMode.RESUME
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -297,7 +299,7 @@ fun CallScreen(
                     ) {
                         Card(
                             shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = AmberWarning.copy(alpha = 0.9f)),
+                            colors = CardDefaults.cardColors(containerColor = if (isResume) AmberWarning.copy(alpha = 0.95f) else RoseDestructive.copy(alpha = 0.95f)),
                             border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.4f))
                         ) {
                             Row(
@@ -312,13 +314,13 @@ fun CallScreen(
                                 )
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "Reconnecting (Attempt #${reconState.attempt})...",
+                                        text = if (isResume) "Reconnecting • Fast Resume (#${reconState.attempt}/${reconState.maxAttempts})" else "Reconnecting • Full Reconnect (#${reconState.attempt}/${reconState.maxAttempts})",
                                         color = Color.White,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp
                                     )
                                     Text(
-                                        text = "ICE Restarting over Google STUN",
+                                        text = if (isResume) "Restarting ICE stream (tracks preserved)" else "Rebuilding WebRTC peer connection...",
                                         color = Color.White.copy(alpha = 0.85f),
                                         fontSize = 11.sp
                                     )
@@ -798,6 +800,9 @@ fun CallScreen(
                             StatRow("Local ICE Candidates", "${liveStats.localCandidatesCount}")
                             StatRow("Remote ICE Candidates", "${liveStats.remoteCandidatesCount}")
                             StatRow("Reconnections Count", "${liveStats.reconnectCount}")
+                            if (liveStats.reconnectStrategy.isNotBlank() && liveStats.reconnectStrategy != "NONE") {
+                                StatRow("Reconnect Strategy", liveStats.reconnectStrategy)
+                            }
                             StatRow("Active STUN Server", "stun.l.google.com:19302")
                         }
                     }
@@ -1211,6 +1216,21 @@ fun LiveStatsHud(
                     color = if (stats.packetsLost == 0L) EmeraldGlow else RoseDestructive
                 )
             }
+
+            if (stats.reconnectCount > 0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Reconnect:", fontSize = 11.sp, color = SlateTextSecondary)
+                    Text(
+                        "${stats.reconnectCount} (${stats.reconnectStrategy.ifBlank { "RESUME" }})",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = AmberWarning
+                    )
+                }
+            }
         }
     }
 }
@@ -1456,6 +1476,9 @@ private fun ReconnectingOverlay(
     state: CallState.Reconnecting,
     onForceReconnect: () -> Unit
 ) {
+    val isResume = state.mode == ReconnectMode.RESUME
+    val indicatorColor = if (isResume) AmberWarning else RoseDestructive
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -1466,36 +1489,39 @@ private fun ReconnectingOverlay(
             modifier = Modifier
                 .size(72.dp)
                 .clip(CircleShape)
-                .background(AmberWarning.copy(alpha = 0.15f))
+                .background(indicatorColor.copy(alpha = 0.15f))
         ) {
             Icon(
                 imageVector = Icons.Default.WifiOff,
                 contentDescription = null,
-                tint = AmberWarning,
+                tint = indicatorColor,
                 modifier = Modifier.size(36.dp)
             )
         }
 
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                text = "Connection Dropped",
+                text = if (isResume) "Reconnecting • Fast Resume" else "Reconnecting • Full Reconnect",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = SlateTextPrimary
             )
             Text(
-                text = "Attempting ICE restart #${state.attempt} (${state.reason})",
+                text = if (isResume)
+                    "Attempting Fast Resume #${state.attempt}/${state.maxAttempts} (${state.reason})"
+                else
+                    "Rebuilding peer connection #${state.attempt}/${state.maxAttempts} (${state.reason})",
                 fontSize = 13.sp,
                 color = SlateTextSecondary,
                 textAlign = TextAlign.Center
             )
         }
 
-        CircularProgressIndicator(color = AmberWarning, modifier = Modifier.size(36.dp))
+        CircularProgressIndicator(color = indicatorColor, modifier = Modifier.size(36.dp))
 
         Button(
             onClick = onForceReconnect,
-            colors = ButtonDefaults.buttonColors(containerColor = AmberWarning),
+            colors = ButtonDefaults.buttonColors(containerColor = indicatorColor),
             shape = RoundedCornerShape(12.dp)
         ) {
             Row(
