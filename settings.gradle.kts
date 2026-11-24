@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Video Call"
+rootProject.name = "CamGuard"
 
 include(":app")

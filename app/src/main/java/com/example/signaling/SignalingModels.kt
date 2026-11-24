@@ -33,10 +33,11 @@ data class MediaStateModel(
 )
 
 sealed class SignalingEvent {
-    data class OfferReceived(val sdp: String) : SignalingEvent()
+    data class OfferReceived(val sdp: String, val sessionId: String = "", val isReconnect: Boolean = false) : SignalingEvent()
     data class AnswerReceived(val sdp: String) : SignalingEvent()
     data class IceCandidateReceived(val candidate: IceCandidateModel, val isCallerCandidate: Boolean) : SignalingEvent()
     data class PeerDisconnected(val reason: String) : SignalingEvent()
+    data class ViewerLeft(val timestamp: Long) : SignalingEvent()
     data class ReconnectRequested(val timestamp: Long) : SignalingEvent()
     data class PeerMediaStateChanged(val isCameraEnabled: Boolean, val isMicEnabled: Boolean) : SignalingEvent()
     data class Error(val message: String) : SignalingEvent()

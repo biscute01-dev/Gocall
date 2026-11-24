@@ -14,7 +14,6 @@ import kotlinx.coroutines.launch
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
-import org.webrtc.CameraEnumerationAndroid
 import org.webrtc.CameraVideoCapturer
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -25,19 +24,21 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RTCStatsCollectorCallback
-import org.webrtc.RTCStatsReport
-import org.webrtc.RtpParameters
 import org.webrtc.RtpReceiver
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
-import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.audio.AudioDeviceModule
 import org.webrtc.audio.JavaAudioDeviceModule
+
+enum class SurveillanceRole {
+    BROADCASTER,
+    VIEWER
+}
 
 data class WebRtcLiveStats(
     val inboundFps: Double = 0.0,
@@ -91,13 +92,14 @@ class WebRtcClient(private val context: Context) {
 
     private var audioSource: AudioSource? = null
     private var localAudioTrack: AudioTrack? = null
+    private var remoteAudioTrack: AudioTrack? = null
 
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
 
     private val _events = MutableSharedFlow<WebRtcEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<WebRtcEvent> = _events.asSharedFlow()
 
-    private val _isFrontCamera = MutableStateFlow(true)
+    private val _isFrontCamera = MutableStateFlow(false)
     val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
 
     private val _isMicEnabled = MutableStateFlow(true)
@@ -105,6 +107,9 @@ class WebRtcClient(private val context: Context) {
 
     private val _isCameraEnabled = MutableStateFlow(true)
     val isCameraEnabled: StateFlow<Boolean> = _isCameraEnabled.asStateFlow()
+
+    private val _isRemoteAudioMuted = MutableStateFlow(false)
+    val isRemoteAudioMuted: StateFlow<Boolean> = _isRemoteAudioMuted.asStateFlow()
 
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
@@ -131,7 +136,7 @@ class WebRtcClient(private val context: Context) {
         PeerConnection.IceServer.builder("stun:stun4.l.google.com:19302").createIceServer()
     )
 
-    // Audio device module for remote audio interception
+    // Audio device module for audio pipeline
     private var audioDeviceModule: AudioDeviceModule? = null
     var remoteAudioListener: ((audioFormat: Int, channelCount: Int, sampleRate: Int, data: ByteArray) -> Unit)? = null
 
@@ -165,8 +170,8 @@ class WebRtcClient(private val context: Context) {
 
         val encoderFactory = DefaultVideoEncoderFactory(
             rootEglBase.eglBaseContext,
-            true, // enableIntelVp8Encoder
-            true  // enableH264HighProfile
+            true,
+            true
         )
         val decoderFactory = DefaultVideoDecoderFactory(rootEglBase.eglBaseContext)
 
@@ -178,31 +183,42 @@ class WebRtcClient(private val context: Context) {
             .createPeerConnectionFactory()
     }
 
-    fun startLocalMedia() {
+    /**
+     * Starts local camera and (optionally) microphone capture.
+     * Only invoked in BROADCASTER mode — VIEWER mode never touches camera or mic hardware.
+     */
+    fun startLocalMedia(preferBackCamera: Boolean = true, enableAudio: Boolean = true) {
         val factory = peerConnectionFactory ?: return
 
-        // Audio track setup with ultra-low delay DSP constraints
-        val audioConstraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("googTypingNoiseDetection", "false"))
-            mandatory.add(MediaConstraints.KeyValuePair("googAudioMirroring", "false"))
-            mandatory.add(MediaConstraints.KeyValuePair("googDAEchoCancellation", "true"))
+        if (enableAudio) {
+            try {
+                val audioConstraints = MediaConstraints().apply {
+                    mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
+                    mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+                    mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
+                    mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
+                    mandatory.add(MediaConstraints.KeyValuePair("googTypingNoiseDetection", "false"))
+                    mandatory.add(MediaConstraints.KeyValuePair("googAudioMirroring", "false"))
+                    mandatory.add(MediaConstraints.KeyValuePair("googDAEchoCancellation", "true"))
+                }
+                audioSource = factory.createAudioSource(audioConstraints)
+                localAudioTrack = factory.createAudioTrack("ARDAMSa0", audioSource)
+                localAudioTrack?.setEnabled(_isMicEnabled.value)
+            } catch (e: Exception) {
+                Log.w(TAG, "Audio capture unavailable (continuing video-only): ${e.message}")
+                _isMicEnabled.value = false
+            }
+        } else {
+            _isMicEnabled.value = false
         }
-        audioSource = factory.createAudioSource(audioConstraints)
-        localAudioTrack = factory.createAudioTrack("ARDAMSa0", audioSource)
-        localAudioTrack?.setEnabled(_isMicEnabled.value)
 
-        // Video track setup
+        // Video track setup — defaults to back-facing camera for surveillance
         val enumerator = Camera2Enumerator(context)
-        videoCapturer = createCameraCapturer(enumerator)
+        videoCapturer = createCameraCapturer(enumerator, preferBackCamera)
 
         videoCapturer?.let { capturer ->
             surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", rootEglBase.eglBaseContext)
             videoSource = factory.createVideoSource(capturer.isScreencast)
-            // Fix frame pacing to consistent 30 FPS to eliminate camera capture jitter
             videoSource?.adaptOutputFormat(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
             capturer.initialize(surfaceTextureHelper, context, videoSource?.capturerObserver)
             try {
@@ -219,7 +235,7 @@ class WebRtcClient(private val context: Context) {
         try {
             renderer.init(rootEglBase.eglBaseContext, null)
             renderer.setEnableHardwareScaler(true)
-            renderer.setMirror(true)
+            renderer.setMirror(_isFrontCamera.value)
             renderer.setFpsReduction(Float.POSITIVE_INFINITY)
             localVideoTrack?.addSink(renderer)
         } catch (e: Exception) {
@@ -247,14 +263,14 @@ class WebRtcClient(private val context: Context) {
         _remoteVideoTrack.value?.removeSink(renderer)
     }
 
-    fun createPeerConnection() {
+    fun createPeerConnection(role: SurveillanceRole = SurveillanceRole.BROADCASTER) {
         val factory = peerConnectionFactory ?: return
 
         val rtcConfig = PeerConnection.RTCConfiguration(googleStunServers).apply {
             iceCandidatePoolSize = 10
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-            enableDscp = true // Expedited Forwarding (DSCP 46) for audio packets
+            enableDscp = true
             bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
             rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
             tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
@@ -293,7 +309,11 @@ class WebRtcClient(private val context: Context) {
             }
 
             override fun onAddStream(stream: MediaStream) {
-                Log.d(TAG, "onAddStream: ${stream.videoTracks.size} video tracks")
+                Log.d(TAG, "onAddStream: ${stream.videoTracks.size} video, ${stream.audioTracks.size} audio")
+                if (stream.audioTracks.isNotEmpty()) {
+                    remoteAudioTrack = stream.audioTracks[0]
+                    remoteAudioTrack?.setEnabled(!_isRemoteAudioMuted.value)
+                }
                 if (stream.videoTracks.isNotEmpty()) {
                     val track = stream.videoTracks[0]
                     _remoteVideoTrack.value = track
@@ -306,6 +326,7 @@ class WebRtcClient(private val context: Context) {
             override fun onRemoveStream(stream: MediaStream) {
                 Log.d(TAG, "onRemoveStream")
                 _remoteVideoTrack.value = null
+                remoteAudioTrack = null
             }
 
             override fun onDataChannel(dataChannel: org.webrtc.DataChannel) {}
@@ -315,23 +336,35 @@ class WebRtcClient(private val context: Context) {
             }
 
             override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
-                val track = receiver.track()
-                if (track is VideoTrack) {
-                    Log.d(TAG, "onAddTrack video track received")
-                    _remoteVideoTrack.value = track
-                    scope.launch {
-                        _events.emit(WebRtcEvent.RemoteTrackReceived(track))
+                when (val track = receiver.track()) {
+                    is VideoTrack -> {
+                        Log.d(TAG, "onAddTrack video track received")
+                        _remoteVideoTrack.value = track
+                        scope.launch {
+                            _events.emit(WebRtcEvent.RemoteTrackReceived(track))
+                        }
+                    }
+                    is AudioTrack -> {
+                        Log.d(TAG, "onAddTrack audio track received")
+                        remoteAudioTrack = track
+                        track.setEnabled(!_isRemoteAudioMuted.value)
                     }
                 }
             }
 
             override fun onTrack(transceiver: RtpTransceiver) {
-                val track = transceiver.receiver.track()
-                if (track is VideoTrack) {
-                    Log.d(TAG, "onTrack video track received")
-                    _remoteVideoTrack.value = track
-                    scope.launch {
-                        _events.emit(WebRtcEvent.RemoteTrackReceived(track))
+                when (val track = transceiver.receiver.track()) {
+                    is VideoTrack -> {
+                        Log.d(TAG, "onTrack video track received")
+                        _remoteVideoTrack.value = track
+                        scope.launch {
+                            _events.emit(WebRtcEvent.RemoteTrackReceived(track))
+                        }
+                    }
+                    is AudioTrack -> {
+                        Log.d(TAG, "onTrack audio track received")
+                        remoteAudioTrack = track
+                        track.setEnabled(!_isRemoteAudioMuted.value)
                     }
                 }
             }
@@ -345,20 +378,28 @@ class WebRtcClient(private val context: Context) {
             }
         })
 
-        // Add local tracks to PeerConnection
+        // Only attach local capture tracks when acting as BROADCASTER (sendonly)
         val pc = peerConnection ?: return
-        localAudioTrack?.let {
-            pc.addTrack(it, listOf("ARDAMS"))
-        }
-        localVideoTrack?.let {
-            pc.addTrack(it, listOf("ARDAMS"))
+        if (role == SurveillanceRole.BROADCASTER) {
+            localAudioTrack?.let {
+                pc.addTrack(it, listOf("CAMGUARD"))
+            }
+            localVideoTrack?.let {
+                pc.addTrack(it, listOf("CAMGUARD"))
+            }
         }
     }
 
-    fun createOffer(onSdpCreated: (SessionDescription) -> Unit, iceRestart: Boolean = false) {
+    fun createOffer(
+        onSdpCreated: (SessionDescription) -> Unit,
+        iceRestart: Boolean = false,
+        isBroadcaster: Boolean = true
+    ) {
         val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
+            // One-way surveillance: Broadcaster only sends, never requests return media
+            val receiveFlag = if (isBroadcaster) "false" else "true"
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", receiveFlag))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", receiveFlag))
             if (iceRestart) {
                 mandatory.add(MediaConstraints.KeyValuePair("IceRestart", "true"))
             }
@@ -452,7 +493,6 @@ class WebRtcClient(private val context: Context) {
             val lines = sdp.split("\r\n", "\n").toMutableList()
             var opusPayloadType: String? = null
 
-            // 1. Locate Opus audio payload type (usually 111)
             for (line in lines) {
                 if (line.startsWith("a=rtpmap:") && line.contains("opus/48000", ignoreCase = true)) {
                     val parts = line.substringAfter("a=rtpmap:").trim().split(" ")
@@ -482,7 +522,6 @@ class WebRtcClient(private val context: Context) {
                         }
                     }
 
-                    // Enforce low latency voice settings
                     paramMap["minptime"] = "10"
                     paramMap["ptime"] = "10"
                     paramMap["maxaveragebitrate"] = "32000"
@@ -519,19 +558,20 @@ class WebRtcClient(private val context: Context) {
         peerConnection?.addIceCandidate(candidate)
     }
 
-    fun restartIce(onSdpCreated: (SessionDescription) -> Unit) {
+    fun restartIce(isBroadcaster: Boolean = true, onSdpCreated: (SessionDescription) -> Unit) {
         Log.d(TAG, "Initiating ICE Restart (Fast Resume) for reconnection...")
-        createOffer(onSdpCreated, iceRestart = true)
+        createOffer(onSdpCreated, iceRestart = true, isBroadcaster = isBroadcaster)
     }
 
     /**
-     * Fallback Full Reconnect:
-     * Tears down the stale PeerConnection cleanly, rebuilds it from scratch,
-     * re-attaches existing local media tracks (without interrupting camera or mic hardware capture),
-     * and triggers a fresh WebRTC negotiation cycle.
+     * Rebuilds PeerConnection from scratch while keeping local camera/mic hardware capture
+     * running smoothly (used for Full Reconnect and Broadcaster reset after viewer leaves).
      */
-    fun rebuildPeerConnection(isCaller: Boolean, onSdpCreated: (SessionDescription) -> Unit = {}) {
-        Log.d(TAG, "Rebuilding PeerConnection from scratch (Full Reconnect Fallback)...")
+    fun rebuildPeerConnection(
+        role: SurveillanceRole,
+        onSdpCreated: (SessionDescription) -> Unit = {}
+    ) {
+        Log.d(TAG, "Rebuilding PeerConnection from scratch (role=$role)...")
         try {
             peerConnection?.close()
             peerConnection?.dispose()
@@ -539,14 +579,14 @@ class WebRtcClient(private val context: Context) {
             Log.w(TAG, "Error disposing previous peer connection: ${e.message}")
         }
         peerConnection = null
+        remoteAudioTrack = null
         _iceConnectionState.value = PeerConnection.IceConnectionState.NEW
         _connectionState.value = PeerConnection.PeerConnectionState.NEW
 
-        // Create fresh PeerConnection and re-attach existing tracks
-        createPeerConnection()
+        createPeerConnection(role)
 
-        if (isCaller) {
-            createOffer(onSdpCreated, iceRestart = false)
+        if (role == SurveillanceRole.BROADCASTER) {
+            createOffer(onSdpCreated, iceRestart = false, isBroadcaster = true)
         }
     }
 
@@ -564,6 +604,13 @@ class WebRtcClient(private val context: Context) {
         return newState
     }
 
+    fun toggleRemoteAudio(muted: Boolean? = null): Boolean {
+        val newMuted = muted ?: !_isRemoteAudioMuted.value
+        _isRemoteAudioMuted.value = newMuted
+        remoteAudioTrack?.setEnabled(!newMuted)
+        return newMuted
+    }
+
     fun switchCamera(onComplete: ((isFront: Boolean) -> Unit)? = null) {
         val capturer = videoCapturer ?: return
         capturer.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
@@ -578,9 +625,24 @@ class WebRtcClient(private val context: Context) {
         })
     }
 
-    private fun createCameraCapturer(enumerator: Camera2Enumerator): CameraVideoCapturer? {
+    private fun createCameraCapturer(
+        enumerator: Camera2Enumerator,
+        preferBackCamera: Boolean
+    ): CameraVideoCapturer? {
         val deviceNames = enumerator.deviceNames
-        // First try front-facing camera
+        if (preferBackCamera) {
+            // Prefer back-facing camera for surveillance broadcasting
+            for (deviceName in deviceNames) {
+                if (enumerator.isBackFacing(deviceName)) {
+                    val capturer = enumerator.createCapturer(deviceName, null)
+                    if (capturer != null) {
+                        _isFrontCamera.value = false
+                        return capturer
+                    }
+                }
+            }
+        }
+        // Try front-facing camera
         for (deviceName in deviceNames) {
             if (enumerator.isFrontFacing(deviceName)) {
                 val capturer = enumerator.createCapturer(deviceName, null)
@@ -590,7 +652,7 @@ class WebRtcClient(private val context: Context) {
                 }
             }
         }
-        // Fallback to back camera
+        // Fallback to any remaining back-facing camera
         for (deviceName in deviceNames) {
             if (enumerator.isBackFacing(deviceName)) {
                 val capturer = enumerator.createCapturer(deviceName, null)
@@ -651,9 +713,7 @@ class WebRtcClient(private val context: Context) {
                                 inWidth = (stats.members["frameWidth"] as? Number)?.toInt() ?: inWidth
                                 inHeight = (stats.members["frameHeight"] as? Number)?.toInt() ?: inHeight
                                 packetsLost += pLost
-                                if (jit > jitterSec) {
-                                    jitterSec = jit
-                                }
+                                if (jit > jitterSec) jitterSec = jit
                                 framesDecoded = (stats.members["framesDecoded"] as? Number)?.toLong() ?: framesDecoded
                                 framesDropped = (stats.members["framesDropped"] as? Number)?.toLong() ?: framesDropped
                                 inCodecId = stats.members["codecId"] as? String
@@ -664,9 +724,7 @@ class WebRtcClient(private val context: Context) {
                                 }
                             } else {
                                 packetsLost += pLost
-                                if (jit > jitterSec) {
-                                    jitterSec = jit
-                                }
+                                if (jit > jitterSec) jitterSec = jit
                             }
                         }
                         "outbound-rtp" -> {
@@ -763,6 +821,8 @@ class WebRtcClient(private val context: Context) {
         localVideoTrack?.setEnabled(false)
         localVideoTrack?.dispose()
         localVideoTrack = null
+
+        remoteAudioTrack = null
 
         peerConnection?.close()
         peerConnection?.dispose()

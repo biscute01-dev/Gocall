@@ -1,28 +1,21 @@
 package com.example.ui.screens
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
-import android.util.Base64
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,51 +27,33 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.People
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -87,43 +62,31 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
-import com.example.auth.FriendRelationshipStatus
-import com.example.auth.FriendRequest
-import com.example.auth.FriendUser
-import com.example.auth.FriendsViewModel
-import com.example.auth.UserProfile
-import com.example.auth.UserSearchResult
-import com.example.ui.components.FriendAvatar
-import com.example.ui.components.ProfileDialog
-import com.example.ui.components.UserAvatar
+import com.example.ui.components.StatusPill
+import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.CyanGlow
 import com.example.ui.theme.EmeraldConnected
 import com.example.ui.theme.EmeraldGlow
 import com.example.ui.theme.GlassDarkBorder
 import com.example.ui.theme.GlassDarkCard
-import com.example.ui.theme.IndigoAccent
-import com.example.ui.theme.IndigoLight
 import com.example.ui.theme.RoseDestructive
+import com.example.ui.theme.RoseGlow
 import com.example.ui.theme.SlateDark700
 import com.example.ui.theme.SlateDark800
 import com.example.ui.theme.SlateDark900
@@ -131,1480 +94,589 @@ import com.example.ui.theme.SlateDark950
 import com.example.ui.theme.SlateTextMuted
 import com.example.ui.theme.SlateTextPrimary
 import com.example.ui.theme.SlateTextSecondary
-import com.example.viewmodel.AuthViewModel
 import com.example.viewmodel.CallViewModel
 
-enum class HomeTab(val title: String) {
-    FRIENDS("Friends"),
-    SEARCH("Find People"),
-    REQUESTS("Requests"),
-    ROOM_CODE("Room Code")
-}
-
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(
     viewModel: CallViewModel,
-    authViewModel: AuthViewModel? = null,
-    friendsViewModel: FriendsViewModel? = null,
-    onOpenProfileEdit: () -> Unit = {},
-    onDirectCallFriend: (FriendUser) -> Unit = {},
-    onCreateCall: (roomId: String) -> Unit,
-    onJoinCall: (roomId: String) -> Unit,
-    modifier: Modifier = Modifier
+    onStartBroadcast: (channelId: String, enableAudio: Boolean) -> Unit,
+    onStartView: (channelId: String) -> Unit
 ) {
     val context = LocalContext.current
-    val focusManager = LocalFocusManager.current
     val clipboardManager = LocalClipboardManager.current
 
-    var selectedTab by remember { mutableStateOf(HomeTab.FRIENDS) }
+    val activeChannel by viewModel.activeChannelId.collectAsState()
+    val recentChannels by viewModel.recentChannels.collectAsState()
+    val customDbUrl by viewModel.customDatabaseUrl.collectAsState()
 
-    var newRoomId by remember { mutableStateOf(viewModel.generateRandomRoomId()) }
-    var joinRoomIdInput by remember { mutableStateOf("") }
+    var channelInput by remember(activeChannel) { mutableStateOf(activeChannel) }
     var showSettingsDialog by remember { mutableStateOf(false) }
-    var showProfileDialog by remember { mutableStateOf(false) }
-    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
-    val userProfile by (authViewModel?.currentUserProfile?.collectAsState() ?: remember { mutableStateOf(null) })
-    val recentRooms by viewModel.recentRooms.collectAsState()
-    val customDatabaseUrl by viewModel.customDatabaseUrl.collectAsState()
-
-    // Sync user profile to FriendsViewModel
-    LaunchedEffect(userProfile) {
-        friendsViewModel?.setUserProfile(userProfile)
-    }
-
-    val friends by (friendsViewModel?.friends?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
-    val incomingRequests by (friendsViewModel?.incomingRequests?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
-    val outgoingRequests by (friendsViewModel?.outgoingRequests?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
-    val searchResults by (friendsViewModel?.searchResults?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
-    val searchQuery by (friendsViewModel?.searchQuery?.collectAsState() ?: remember { mutableStateOf("") })
-    val isSearching by (friendsViewModel?.isSearching?.collectAsState() ?: remember { mutableStateOf(false) })
-    val actionSuccess by (friendsViewModel?.actionSuccess?.collectAsState() ?: remember { mutableStateOf(null) })
-    val actionError by (friendsViewModel?.actionError?.collectAsState() ?: remember { mutableStateOf(null) })
-
-    LaunchedEffect(actionSuccess) {
-        actionSuccess?.let {
-            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
-            friendsViewModel?.clearFeedback()
-        }
-    }
-
-    LaunchedEffect(actionError) {
-        actionError?.let {
-            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
-            friendsViewModel?.clearFeedback()
-        }
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
+    val broadcastPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val cameraGranted = permissions[Manifest.permission.CAMERA] == true
-        val audioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
-        if (cameraGranted && audioGranted) {
-            pendingAction?.invoke()
-            pendingAction = null
+    ) { results ->
+        val cameraGranted = results[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val audioGranted = results[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+        if (cameraGranted) {
+            val targetChannel = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
+            onStartBroadcast(targetChannel, audioGranted)
         } else {
             Toast.makeText(
                 context,
-                "Camera and Microphone permissions are required for video calls",
+                "Camera permission is required to Broadcast.",
                 Toast.LENGTH_LONG
             ).show()
         }
     }
 
-    fun checkAndRun(action: () -> Unit) {
+    fun launchBroadcastOneTap() {
+        val targetChannel = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
         val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (hasCamera && hasAudio) {
-            action()
+        val needsNotif = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+
+        if (hasCamera && hasAudio && !needsNotif) {
+            onStartBroadcast(targetChannel, true)
         } else {
-            pendingAction = action
-            permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
+            val toRequest = mutableListOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                toRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            broadcastPermissionLauncher.launch(toRequest.toTypedArray())
         }
     }
 
-    Surface(
-        modifier = modifier.fillMaxSize(),
-        color = SlateDark950
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            SlateDark900,
-                            SlateDark950,
-                            Color(0xFF070A12)
-                        )
+    fun launchViewOneTap() {
+        val targetChannel = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
+        onStartView(targetChannel)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(SlateDark950)
+            .drawBehind {
+                // Subtle dual tactical ambient glows
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(RoseDestructive.copy(alpha = 0.14f), Color.Transparent),
+                        center = Offset(size.width * 0.12f, size.height * 0.18f),
+                        radius = size.width * 0.7f
                     )
                 )
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(CyanAccent.copy(alpha = 0.14f), Color.Transparent),
+                        center = Offset(size.width * 0.88f, size.height * 0.72f),
+                        radius = size.width * 0.75f
+                    )
+                )
+            }
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 640.dp)
+                .align(Alignment.TopCenter)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+            // 1. Tactical Brand Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // Header Bar with User Profile & Settings
-                item {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .widthIn(max = 600.dp),
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(CyanAccent.copy(alpha = 0.25f), SlateDark800)
+                                )
+                            )
+                            .border(1.dp, CyanGlow.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = "CamGuard Logo",
+                            tint = CyanGlow,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "CamGuard",
+                            color = SlateTextPrimary,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = (-0.5).sp
+                        )
+                        Text(
+                            text = "Instant P2P Surveillance",
+                            color = SlateTextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    StatusPill(
+                        text = "NO LOGIN",
+                        stateColor = EmeraldGlow,
+                        isPulsing = false
+                    )
+                    IconButton(
+                        onClick = { showSettingsDialog = true },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(SlateDark800.copy(alpha = 0.7f))
+                            .border(1.dp, GlassDarkBorder, CircleShape)
+                            .testTag("settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Signaling Settings",
+                            tint = SlateTextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+
+            // 2. Active Camera Channel Card (Pre-filled for zero-typing 1-tap pairing)
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = GlassDarkCard),
+                border = BorderStroke(1.dp, GlassDarkBorder),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // User Profile Pill (Avatar + Greeting + @username)
-                        if (userProfile != null) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(32.dp))
-                                    .background(GlassDarkCard)
-                                    .border(1.dp, GlassDarkBorder, RoundedCornerShape(32.dp))
-                                    .clickable { showProfileDialog = true }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                                    .testTag("user_profile_header_pill")
-                            ) {
-                                UserAvatar(
-                                    userProfile = userProfile,
-                                    size = 38.dp,
-                                    borderWidth = 1.5.dp,
-                                    borderColor = CyanGlow
-                                )
-                                Column {
-                                    Text(
-                                        text = userProfile?.displayName?.ifBlank { "User" } ?: "User",
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SlateTextPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "@${userProfile?.username ?: ""}",
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = CyanGlow
-                                    )
-                                }
-                            }
-                        } else {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier
-                                        .size(40.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(
-                                            Brush.linearGradient(
-                                                listOf(IndigoAccent, CyanAccent)
-                                            )
-                                        )
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Videocam,
-                                        contentDescription = null,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                                Column {
-                                    Text(
-                                        text = "Messenger Calls",
-                                        fontSize = 18.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SlateTextPrimary
-                                    )
-                                    Text(
-                                        text = "Direct 1-on-1 Video Calling",
-                                        fontSize = 12.sp,
-                                        color = CyanGlow
-                                    )
-                                }
-                            }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Sensors,
+                                contentDescription = null,
+                                tint = CyanGlow,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "CAMERA CHANNEL CODE",
+                                color = SlateTextSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                        }
+                        Text(
+                            text = "Use same code on both devices",
+                            color = SlateTextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = channelInput,
+                            onValueChange = { next ->
+                                channelInput = next
+                                viewModel.setActiveChannelId(next)
+                            },
+                            singleLine = true,
+                            placeholder = { Text("cam-01", color = SlateTextMuted) },
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                color = SlateTextPrimary,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = CyanGlow,
+                                unfocusedBorderColor = SlateDark700,
+                                focusedContainerColor = SlateDark900,
+                                unfocusedContainerColor = SlateDark900,
+                                cursorColor = CyanGlow
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("channel_code_input")
+                        )
+
+                        IconButton(
+                            onClick = {
+                                val code = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
+                                clipboardManager.setText(AnnotatedString(code))
+                                Toast.makeText(context, "Copied '$code'", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier
+                                .size(52.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(SlateDark800)
+                                .border(1.dp, SlateDark700, RoundedCornerShape(14.dp))
+                                .testTag("copy_channel_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "Copy Channel Code",
+                                tint = SlateTextPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
 
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        IconButton(
+                            onClick = {
+                                val newCode = viewModel.generateRandomChannelId()
+                                channelInput = newCode
+                            },
+                            modifier = Modifier
+                                .size(52.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(SlateDark800)
+                                .border(1.dp, SlateDark700, RoundedCornerShape(14.dp))
+                                .testTag("random_channel_button")
                         ) {
-                            IconButton(
-                                onClick = { showSettingsDialog = true },
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(SlateDark800.copy(alpha = 0.6f))
-                                    .border(1.dp, GlassDarkBorder, CircleShape)
-                                    .testTag("settings_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Settings",
-                                    tint = SlateTextSecondary
-                                )
-                            }
+                            Icon(
+                                imageVector = Icons.Default.Casino,
+                                contentDescription = "Generate Private Code",
+                                tint = CyanGlow,
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
                     }
-                }
 
-                // Modern Navigation Tabs
-                item {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .widthIn(max = 600.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = SlateDark900),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                    ) {
+                    if (recentChannels.isNotEmpty()) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(4.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            // 1. Friends Tab
-                            TabItemButton(
-                                title = "Friends",
-                                icon = Icons.Default.People,
-                                isSelected = selectedTab == HomeTab.FRIENDS,
-                                badgeCount = if (friends.isNotEmpty()) friends.size else null,
-                                badgeColor = IndigoAccent,
-                                onClick = { selectedTab = HomeTab.FRIENDS },
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            // 2. Search Tab
-                            TabItemButton(
-                                title = "Find",
-                                icon = Icons.Default.PersonAdd,
-                                isSelected = selectedTab == HomeTab.SEARCH,
-                                onClick = { selectedTab = HomeTab.SEARCH },
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            // 3. Requests Tab
-                            TabItemButton(
-                                title = "Requests",
-                                icon = Icons.Default.Notifications,
-                                isSelected = selectedTab == HomeTab.REQUESTS,
-                                badgeCount = if (incomingRequests.isNotEmpty()) incomingRequests.size else null,
-                                badgeColor = RoseDestructive,
-                                onClick = { selectedTab = HomeTab.REQUESTS },
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            // 4. Room Code Tab
-                            TabItemButton(
-                                title = "Room ID",
-                                icon = Icons.Default.Lock,
-                                isSelected = selectedTab == HomeTab.ROOM_CODE,
-                                onClick = { selectedTab = HomeTab.ROOM_CODE },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-
-                // Tab Content Rendering
-                when (selectedTab) {
-                    HomeTab.FRIENDS -> {
-                        if (friends.isEmpty()) {
-                            item {
-                                EmptyFriendsCard(onFindFriendsClick = { selectedTab = HomeTab.SEARCH })
-                            }
-                        } else {
-                            item {
-                                Row(
+                            recentChannels.forEach { recent ->
+                                val isSelected = recent.equals(channelInput.trim(), ignoreCase = true)
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelected) CyanAccent.copy(alpha = 0.2f) else SlateDark900,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) CyanGlow.copy(alpha = 0.6f) else SlateDark700
+                                    ),
                                     modifier = Modifier
-                                        .fillMaxWidth()
-                                        .widthIn(max = 600.dp)
-                                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable {
+                                            channelInput = recent
+                                            viewModel.setActiveChannelId(recent)
+                                        }
                                 ) {
                                     Text(
-                                        text = "CONTACTS (${friends.size})",
+                                        text = "#$recent",
+                                        color = if (isSelected) CyanGlow else SlateTextSecondary,
                                         fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = CyanGlow,
-                                        letterSpacing = 1.sp
-                                    )
-                                    Text(
-                                        text = "Tap to start video call",
-                                        fontSize = 11.sp,
-                                        color = SlateTextMuted
-                                    )
-                                }
-                            }
-
-                            // WhatsApp-style compact list container
-                            item {
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .widthIn(max = 600.dp),
-                                    shape = RoundedCornerShape(18.dp),
-                                    colors = CardDefaults.cardColors(containerColor = SlateDark900),
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                                ) {
-                                    Column(modifier = Modifier.fillMaxWidth()) {
-                                        friends.forEachIndexed { index, friend ->
-                                            FriendCard(
-                                                friend = friend,
-                                                onCallClick = {
-                                                    checkAndRun {
-                                                        if (userProfile != null) {
-                                                            viewModel.startDirectCall(friend, userProfile!!)
-                                                            onDirectCallFriend(friend)
-                                                        } else {
-                                                            Toast.makeText(context, "Please complete your profile first", Toast.LENGTH_SHORT).show()
-                                                        }
-                                                    }
-                                                },
-                                                onUnfriendClick = {
-                                                    friendsViewModel?.removeFriend(friend.uid, friend.displayName)
-                                                }
-                                            )
-                                            if (index < friends.size - 1) {
-                                                HorizontalDivider(
-                                                    modifier = Modifier.padding(start = 72.dp, end = 16.dp),
-                                                    color = SlateDark800,
-                                                    thickness = 0.8.dp
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    HomeTab.SEARCH -> {
-                        item {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .widthIn(max = 600.dp),
-                                shape = RoundedCornerShape(18.dp),
-                                colors = CardDefaults.cardColors(containerColor = SlateDark900),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                                ) {
-                                    Text(
-                                        text = "Find People to Call",
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SlateTextPrimary
-                                    )
-                                    Text(
-                                        text = "Search by username (e.g. @alex) or display name to send a friend request.",
-                                        fontSize = 12.sp,
-                                        color = SlateTextSecondary
-                                    )
-
-                                    OutlinedTextField(
-                                        value = searchQuery,
-                                        onValueChange = { friendsViewModel?.onSearchQueryChanged(it) },
-                                        placeholder = { Text("Search @username or name...") },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = Icons.Default.Search,
-                                                contentDescription = "Search",
-                                                tint = CyanGlow
-                                            )
-                                        },
-                                        trailingIcon = {
-                                            if (isSearching) {
-                                                CircularProgressIndicator(
-                                                    modifier = Modifier.size(20.dp),
-                                                    strokeWidth = 2.dp,
-                                                    color = CyanGlow
-                                                )
-                                            } else if (searchQuery.isNotEmpty()) {
-                                                IconButton(onClick = { friendsViewModel?.onSearchQueryChanged("") }) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Close,
-                                                        contentDescription = "Clear",
-                                                        tint = SlateTextMuted
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        singleLine = true,
-                                        colors = OutlinedTextFieldDefaults.colors(
-                                            focusedBorderColor = CyanGlow,
-                                            unfocusedBorderColor = SlateDark700,
-                                            focusedTextColor = SlateTextPrimary,
-                                            unfocusedTextColor = SlateTextPrimary,
-                                            focusedContainerColor = SlateDark950,
-                                            unfocusedContainerColor = SlateDark950
-                                        ),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("friend_search_input")
-                                    )
-                                }
-                            }
-                        }
-
-                        if (searchQuery.isNotBlank()) {
-                            if (searchResults.isEmpty() && !isSearching) {
-                                item {
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .widthIn(max = 600.dp),
-                                        shape = RoundedCornerShape(16.dp),
-                                        colors = CardDefaults.cardColors(containerColor = GlassDarkCard)
-                                    ) {
-                                        Column(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(28.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Person,
-                                                contentDescription = null,
-                                                tint = SlateTextMuted,
-                                                modifier = Modifier.size(36.dp)
-                                            )
-                                            Text(
-                                                text = "No users found matching \"$searchQuery\"",
-                                                color = SlateTextSecondary,
-                                                fontSize = 14.sp,
-                                                textAlign = TextAlign.Center
-                                            )
-                                        }
-                                    }
-                                }
-                            } else {
-                                items(searchResults, key = { it.user.uid }) { result ->
-                                    UserSearchResultCard(
-                                        result = result,
-                                        onAddFriend = {
-                                            friendsViewModel?.sendFriendRequest(result.user)
-                                        },
-                                        onAcceptRequest = {
-                                            val req = incomingRequests.firstOrNull { it.senderUid == result.user.uid }
-                                            if (req != null) {
-                                                friendsViewModel?.acceptFriendRequest(req)
-                                            }
-                                        },
-                                        onCancelRequest = {
-                                            friendsViewModel?.cancelOutgoingRequest(result.user.uid)
-                                        },
-                                        onCallFriend = {
-                                            checkAndRun {
-                                                val friend = FriendUser(
-                                                    uid = result.user.uid,
-                                                    displayName = result.user.displayName,
-                                                    username = result.user.username,
-                                                    photoUrl = result.user.photoUrl,
-                                                    avatarBase64 = result.user.avatarBase64
-                                                )
-                                                if (userProfile != null) {
-                                                    viewModel.startDirectCall(friend, userProfile!!)
-                                                    onDirectCallFriend(friend)
-                                                }
-                                            }
-                                        }
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                     )
                                 }
                             }
                         }
                     }
-
-                    HomeTab.REQUESTS -> {
-                        // Incoming Requests Section
-                        item {
-                            Text(
-                                text = "INCOMING REQUESTS (${incomingRequests.size})",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = CyanGlow,
-                                letterSpacing = 1.sp,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .widthIn(max = 600.dp)
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                        }
-
-                        if (incomingRequests.isEmpty()) {
-                            item {
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .widthIn(max = 600.dp),
-                                    shape = RoundedCornerShape(16.dp),
-                                    colors = CardDefaults.cardColors(containerColor = GlassDarkCard)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(24.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "No pending incoming requests",
-                                            color = SlateTextMuted,
-                                            fontSize = 13.sp
-                                        )
-                                    }
-                                }
-                            }
-                        } else {
-                            items(incomingRequests, key = { it.senderUid }) { request ->
-                                IncomingRequestCard(
-                                    request = request,
-                                    onAccept = { friendsViewModel?.acceptFriendRequest(request) },
-                                    onReject = { friendsViewModel?.rejectFriendRequest(request) }
-                                )
-                            }
-                        }
-
-                        // Outgoing Requests Section
-                        if (outgoingRequests.isNotEmpty()) {
-                            item {
-                                Spacer(modifier = Modifier.height(10.dp))
-                                Text(
-                                    text = "SENT REQUESTS (${outgoingRequests.size})",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = SlateTextSecondary,
-                                    letterSpacing = 1.sp,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .widthIn(max = 600.dp)
-                                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                                )
-                            }
-
-                            items(outgoingRequests, key = { it.receiverUid }) { request ->
-                                OutgoingRequestCard(
-                                    request = request,
-                                    onCancel = { friendsViewModel?.cancelOutgoingRequest(request.receiverUid) }
-                                )
-                            }
-                        }
-                    }
-
-                    HomeTab.ROOM_CODE -> {
-                        // Start New Room Section
-                        item {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .widthIn(max = 600.dp),
-                                shape = RoundedCornerShape(20.dp),
-                                colors = CardDefaults.cardColors(containerColor = SlateDark900),
-                                border = androidx.compose.foundation.BorderStroke(
-                                    1.5.dp,
-                                    Brush.linearGradient(listOf(CyanGlow.copy(alpha = 0.6f), IndigoAccent.copy(alpha = 0.3f)))
-                                )
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(20.dp),
-                                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "Start Room by Code",
-                                            fontSize = 16.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = SlateTextPrimary
-                                        )
-
-                                        IconButton(
-                                            onClick = { newRoomId = viewModel.generateRandomRoomId() },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Refresh,
-                                                contentDescription = "Generate new ID",
-                                                tint = CyanGlow
-                                            )
-                                        }
-                                    }
-
-                                    OutlinedTextField(
-                                        value = newRoomId,
-                                        onValueChange = { newRoomId = it.trim().lowercase() },
-                                        label = { Text("Call Room ID") },
-                                        singleLine = true,
-                                        trailingIcon = {
-                                            Row {
-                                                IconButton(
-                                                    onClick = {
-                                                        clipboardManager.setText(AnnotatedString(newRoomId))
-                                                        Toast.makeText(context, "Room ID copied: $newRoomId", Toast.LENGTH_SHORT).show()
-                                                    }
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.ContentCopy,
-                                                        contentDescription = "Copy Room ID",
-                                                        tint = SlateTextSecondary
-                                                    )
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        val sendIntent = Intent().apply {
-                                                            action = Intent.ACTION_SEND
-                                                            putExtra(Intent.EXTRA_TEXT, "Join my 1-on-1 video call on Room ID: $newRoomId")
-                                                            type = "text/plain"
-                                                        }
-                                                        val shareIntent = Intent.createChooser(sendIntent, "Share Call Room ID")
-                                                        context.startActivity(shareIntent)
-                                                    }
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Share,
-                                                        contentDescription = "Share Room ID",
-                                                        tint = CyanGlow
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        colors = OutlinedTextFieldDefaults.colors(
-                                            focusedBorderColor = CyanGlow,
-                                            unfocusedBorderColor = SlateDark700,
-                                            focusedLabelColor = CyanGlow,
-                                            unfocusedLabelColor = SlateTextSecondary,
-                                            focusedTextColor = SlateTextPrimary,
-                                            unfocusedTextColor = SlateTextPrimary,
-                                            focusedContainerColor = SlateDark950,
-                                            unfocusedContainerColor = SlateDark950
-                                        ),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-
-                                    Button(
-                                        onClick = {
-                                            focusManager.clearFocus()
-                                            checkAndRun { onCreateCall(newRoomId) }
-                                        },
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(50.dp),
-                                        shape = RoundedCornerShape(14.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                                        contentPadding = androidx.compose.foundation.layout.PaddingValues()
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(
-                                                    Brush.horizontalGradient(listOf(IndigoAccent, CyanAccent))
-                                                ),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                            ) {
-                                                Icon(imageVector = Icons.Default.Call, contentDescription = null, tint = Color.White)
-                                                Text("Create Room", fontWeight = FontWeight.Bold, color = Color.White)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Join Call Section
-                        item {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .widthIn(max = 600.dp),
-                                shape = RoundedCornerShape(20.dp),
-                                colors = CardDefaults.cardColors(containerColor = SlateDark900),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(20.dp),
-                                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                                ) {
-                                    Text(
-                                        text = "Join Room by Code",
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = SlateTextPrimary
-                                    )
-
-                                    OutlinedTextField(
-                                        value = joinRoomIdInput,
-                                        onValueChange = { joinRoomIdInput = it.trim().lowercase() },
-                                        label = { Text("Enter Peer Room ID") },
-                                        placeholder = { Text("e.g. call-4921") },
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                                        keyboardActions = KeyboardActions(onDone = {
-                                            focusManager.clearFocus()
-                                            if (joinRoomIdInput.isNotBlank()) {
-                                                checkAndRun { onJoinCall(joinRoomIdInput) }
-                                            }
-                                        }),
-                                        trailingIcon = {
-                                            IconButton(
-                                                onClick = {
-                                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                                    val clip = clipboard.primaryClip
-                                                    if (clip != null && clip.itemCount > 0) {
-                                                        val pasted = clip.getItemAt(0).text?.toString() ?: ""
-                                                        val clean = pasted.replace(".*Room ID:\\s*".toRegex(), "").trim().lowercase()
-                                                        joinRoomIdInput = clean
-                                                        Toast.makeText(context, "Pasted: $clean", Toast.LENGTH_SHORT).show()
-                                                    }
-                                                }
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.ContentPaste,
-                                                    contentDescription = "Paste from clipboard",
-                                                    tint = IndigoLight
-                                                )
-                                            }
-                                        },
-                                        colors = OutlinedTextFieldDefaults.colors(
-                                            focusedBorderColor = IndigoLight,
-                                            unfocusedBorderColor = SlateDark700,
-                                            focusedLabelColor = IndigoLight,
-                                            unfocusedLabelColor = SlateTextSecondary,
-                                            focusedTextColor = SlateTextPrimary,
-                                            unfocusedTextColor = SlateTextPrimary,
-                                            focusedContainerColor = SlateDark950,
-                                            unfocusedContainerColor = SlateDark950
-                                        ),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-
-                                    Button(
-                                        onClick = {
-                                            focusManager.clearFocus()
-                                            if (joinRoomIdInput.isBlank()) {
-                                                Toast.makeText(context, "Please enter a Room ID", Toast.LENGTH_SHORT).show()
-                                                return@Button
-                                            }
-                                            checkAndRun { onJoinCall(joinRoomIdInput) }
-                                        },
-                                        enabled = joinRoomIdInput.isNotBlank(),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(50.dp),
-                                        shape = RoundedCornerShape(14.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = IndigoAccent,
-                                            disabledContainerColor = SlateDark800
-                                        )
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Icon(imageVector = Icons.Default.Videocam, contentDescription = null, tint = Color.White)
-                                            Text("Join Room", fontWeight = FontWeight.Bold, color = Color.White)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Recent Rooms
-                        if (recentRooms.isNotEmpty()) {
-                            item {
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .widthIn(max = 600.dp),
-                                    shape = RoundedCornerShape(20.dp),
-                                    colors = CardDefaults.cardColors(containerColor = GlassDarkCard),
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                                ) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(16.dp),
-                                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.History,
-                                                    contentDescription = null,
-                                                    tint = CyanGlow,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                                Text(
-                                                    text = "Recent Rooms",
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = SlateTextPrimary
-                                                )
-                                            }
-
-                                            TextButton(onClick = { viewModel.clearRecentRooms() }) {
-                                                Text("Clear", fontSize = 12.sp, color = SlateTextMuted)
-                                            }
-                                        }
-
-                                        FlowRow(
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            recentRooms.forEach { room ->
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                                    modifier = Modifier
-                                                        .clip(RoundedCornerShape(10.dp))
-                                                        .background(SlateDark800)
-                                                        .border(1.dp, GlassDarkBorder, RoundedCornerShape(10.dp))
-                                                        .clickable {
-                                                            joinRoomIdInput = room
-                                                            checkAndRun { onJoinCall(room) }
-                                                        }
-                                                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Videocam,
-                                                        contentDescription = null,
-                                                        tint = CyanGlow,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Text(
-                                                        text = room,
-                                                        fontSize = 13.sp,
-                                                        fontFamily = FontFamily.Monospace,
-                                                        color = SlateTextPrimary
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                item {
-                    Spacer(modifier = Modifier.height(20.dp))
                 }
             }
+
+            // 3. Single-Tap Mode Selector Section
+            Text(
+                text = "SELECT DEVICE MODE",
+                color = SlateTextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.2.sp,
+                modifier = Modifier.padding(start = 4.dp)
+            )
+
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val isWide = maxWidth >= 520.dp
+                if (isWide) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        SurveillanceModeCard(
+                            title = "Broadcast",
+                            badge = "CAMERA UNIT",
+                            subtitle = "Stream this device's rear camera & audio live to a viewer",
+                            highlights = listOf("Rear Cam Default", "Stealth Blackout", "Auto-Ready"),
+                            actionLabel = "TAP TO BROADCAST",
+                            accentColor = RoseDestructive,
+                            accentGlow = RoseGlow,
+                            icon = Icons.Default.Videocam,
+                            testTag = "broadcast_mode_button",
+                            onClick = { launchBroadcastOneTap() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        SurveillanceModeCard(
+                            title = "View",
+                            badge = "MONITOR UNIT",
+                            subtitle = "Watch the live camera stream & record HD MP4 clips",
+                            highlights = listOf("HD Record", "No Camera Needed", "Live PiP"),
+                            actionLabel = "TAP TO VIEW LIVE",
+                            accentColor = CyanAccent,
+                            accentGlow = CyanGlow,
+                            icon = Icons.Default.Visibility,
+                            testTag = "view_mode_button",
+                            onClick = { launchViewOneTap() },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        SurveillanceModeCard(
+                            title = "Broadcast",
+                            badge = "CAMERA UNIT",
+                            subtitle = "Stream this device's rear camera & audio live to a viewer",
+                            highlights = listOf("Rear Cam Default", "Stealth Blackout", "Auto-Ready"),
+                            actionLabel = "TAP TO BROADCAST",
+                            accentColor = RoseDestructive,
+                            accentGlow = RoseGlow,
+                            icon = Icons.Default.Videocam,
+                            testTag = "broadcast_mode_button",
+                            onClick = { launchBroadcastOneTap() },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        SurveillanceModeCard(
+                            title = "View",
+                            badge = "MONITOR UNIT",
+                            subtitle = "Watch the live camera stream & record HD MP4 clips",
+                            highlights = listOf("HD Record", "No Camera Needed", "Live PiP"),
+                            actionLabel = "TAP TO VIEW LIVE",
+                            accentColor = CyanAccent,
+                            accentGlow = CyanGlow,
+                            icon = Icons.Default.Visibility,
+                            testTag = "view_mode_button",
+                            onClick = { launchViewOneTap() },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            // 4. Compact 2-Step Quick Guide
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.7f)),
+                border = BorderStroke(1.dp, SlateDark800),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FiberManualRecord,
+                        contentDescription = null,
+                        tint = EmeraldConnected,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = "Phone 1 taps Broadcast. Phone 2 taps View on the same channel code ('${channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }}'). Order doesn't matter — both auto-connect.",
+                        color = SlateTextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 
-    // Settings Dialog
     if (showSettingsDialog) {
-        var tempUrl by remember { mutableStateOf(customDatabaseUrl ?: "") }
-        AlertDialog(
-            onDismissRequest = { showSettingsDialog = false },
-            title = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.Settings, contentDescription = null, tint = CyanGlow)
-                    Text("Signaling & Network Settings", fontSize = 18.sp, color = SlateTextPrimary)
-                }
-            },
-            text = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "Firebase Realtime Database URL (Optional)",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = SlateTextPrimary
-                    )
-                    Text(
-                        text = "Leave empty to use default pre-configured Realtime Database signaling endpoint.",
-                        fontSize = 12.sp,
-                        color = SlateTextMuted
-                    )
-
-                    OutlinedTextField(
-                        value = tempUrl,
-                        onValueChange = { tempUrl = it },
-                        placeholder = { Text("https://<project>-default-rtdb.firebaseio.com") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(10.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = CyanGlow,
-                            unfocusedBorderColor = SlateDark700,
-                            focusedTextColor = SlateTextPrimary,
-                            unfocusedTextColor = SlateTextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Card(
-                        shape = RoundedCornerShape(10.dp),
-                        colors = CardDefaults.cardColors(containerColor = SlateDark950),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("Active STUN Servers:", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = CyanGlow)
-                            Text("• stun:stun.l.google.com:19302", fontSize = 11.sp, color = SlateTextSecondary)
-                            Text("• stun:stun1.l.google.com:19302", fontSize = 11.sp, color = SlateTextSecondary)
-                            Text("• stun:stun2.l.google.com:19302", fontSize = 11.sp, color = SlateTextSecondary)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.setCustomDatabaseUrl(tempUrl)
-                        showSettingsDialog = false
-                        Toast.makeText(context, "Settings saved", Toast.LENGTH_SHORT).show()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = CyanAccent)
-                ) {
-                    Text("Save", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSettingsDialog = false }) {
-                    Text("Cancel", color = SlateTextMuted)
-                }
-            },
-            containerColor = SlateDark900,
-            shape = RoundedCornerShape(20.dp)
-        )
-    }
-
-    // Profile Details Dialog
-    if (showProfileDialog && userProfile != null) {
-        ProfileDialog(
-            userProfile = userProfile!!,
-            onDismiss = { showProfileDialog = false },
-            onEditProfile = {
-                showProfileDialog = false
-                onOpenProfileEdit()
-            },
-            onSignOut = {
-                showProfileDialog = false
-                authViewModel?.signOut()
+        SignalingSettingsDialog(
+            currentUrl = customDbUrl ?: "",
+            onDismiss = { showSettingsDialog = false },
+            onSave = { newUrl ->
+                viewModel.setCustomDatabaseUrl(newUrl)
+                showSettingsDialog = false
+                Toast.makeText(context, "Signaling database updated", Toast.LENGTH_SHORT).show()
             }
         )
     }
 }
 
-// ------------------------------------------------------------------------------------------------
-// SUBCOMPONENTS: Tabs, Friend Cards, Search Results, Request Cards
-// ------------------------------------------------------------------------------------------------
-
 @Composable
-private fun TabItemButton(
+private fun SurveillanceModeCard(
     title: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    isSelected: Boolean,
-    badgeCount: Int? = null,
-    badgeColor: Color = CyanGlow,
+    badge: String,
+    subtitle: String,
+    highlights: List<String>,
+    actionLabel: String,
+    accentColor: Color,
+    accentGlow: Color,
+    icon: ImageVector,
+    testTag: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = SlateDark900),
+        border = BorderStroke(1.5.dp, accentColor.copy(alpha = 0.45f)),
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (isSelected) SlateDark800 else Color.Transparent)
-            .border(
-                1.dp,
-                if (isSelected) CyanGlow.copy(alpha = 0.5f) else Color.Transparent,
-                RoundedCornerShape(12.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(bounded = true, color = accentGlow),
+                onClick = onClick
             )
-            .clickable { onClick() }
-            .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center
+            .testTag(testTag)
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            BadgedBox(
-                badge = {
-                    if (badgeCount != null && badgeCount > 0) {
-                        Badge(containerColor = badgeColor) {
-                            Text(badgeCount.toString(), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    tint = if (isSelected) CyanGlow else SlateTextMuted,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            Text(
-                text = title,
-                fontSize = 11.sp,
-                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                color = if (isSelected) SlateTextPrimary else SlateTextMuted
-            )
-        }
-    }
-}
-
-@Composable
-private fun FriendCard(
-    friend: FriendUser,
-    onCallClick: () -> Unit,
-    onUnfriendClick: () -> Unit
-) {
-    val context = LocalContext.current
-    var showMenu by remember { mutableStateOf(false) }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onCallClick() }
-            .padding(horizontal = 16.dp, vertical = 10.dp)
-            .testTag("friend_card_${friend.username}"),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        // Left: Avatar + Online Badge + Name & Username
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier.weight(1f)
-        ) {
-            Box(modifier = Modifier.size(48.dp)) {
-                FriendAvatar(
-                    friend = friend,
-                    size = 48.dp,
-                    borderWidth = if (friend.isOnline) 2.dp else 1.dp,
-                    borderColor = if (friend.isOnline) EmeraldGlow else GlassDarkBorder
-                )
-
-                // Online indicator dot
-                if (friend.isOnline) {
-                    Box(
-                        modifier = Modifier
-                            .size(13.dp)
-                            .clip(CircleShape)
-                            .background(EmeraldConnected)
-                            .border(2.dp, SlateDark900, CircleShape)
-                            .align(Alignment.BottomEnd)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(
+                            accentColor.copy(alpha = 0.16f),
+                            SlateDark900,
+                            SlateDark900
+                        )
                     )
-                }
-            }
-
+                )
+                .padding(20.dp)
+        ) {
             Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                Text(
-                    text = friend.displayName.ifBlank { "@${friend.username}".ifBlank { "User" } },
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = SlateTextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    if (friend.isOnline) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(EmeraldConnected)
-                        )
-                        Text(
-                            text = "Online",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = EmeraldConnected
-                        )
-                        Text(
-                            text = "•",
-                            fontSize = 11.sp,
-                            color = SlateTextMuted
-                        )
-                    }
-                    Text(
-                        text = "@${friend.username}",
-                        fontSize = 12.sp,
-                        color = SlateTextMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-
-        // Right: WhatsApp-style Call & Options Buttons
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            // Video Call Button (WhatsApp style with gradient accent)
-            IconButton(
-                onClick = onCallClick,
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(
-                            listOf(CyanAccent.copy(alpha = 0.2f), IndigoAccent.copy(alpha = 0.2f))
-                        )
-                    )
-                    .border(1.dp, CyanGlow.copy(alpha = 0.4f), CircleShape)
-                    .testTag("call_friend_button_${friend.username}")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Videocam,
-                    contentDescription = "Video Call",
-                    tint = CyanGlow,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            // More Options (Unfriend / Copy)
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "Options",
-                        tint = SlateTextMuted,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                DropdownMenu(
-                    expanded = showMenu,
-                    onDismissRequest = { showMenu = false },
-                    modifier = Modifier.background(SlateDark900)
-                ) {
-                    DropdownMenuItem(
-                        text = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(Icons.Default.Videocam, contentDescription = null, tint = CyanGlow, modifier = Modifier.size(18.dp))
-                                Text("Start Video Call", color = SlateTextPrimary)
-                            }
-                        },
-                        onClick = {
-                            showMenu = false
-                            onCallClick()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(Icons.Default.Share, contentDescription = null, tint = SlateTextSecondary, modifier = Modifier.size(18.dp))
-                                Text("Copy Username", color = SlateTextPrimary)
-                            }
-                        },
-                        onClick = {
-                            showMenu = false
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Username", "@${friend.username}"))
-                            Toast.makeText(context, "Copied @${friend.username}", Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(Icons.Default.Close, contentDescription = null, tint = RoseDestructive, modifier = Modifier.size(18.dp))
-                                Text("Unfriend", color = RoseDestructive)
-                            }
-                        },
-                        onClick = {
-                            showMenu = false
-                            onUnfriendClick()
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyFriendsCard(onFindFriendsClick: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .widthIn(max = 600.dp),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = SlateDark900),
-        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .clip(CircleShape)
-                    .background(IndigoAccent.copy(alpha = 0.15f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.People,
-                    contentDescription = null,
-                    tint = CyanGlow,
-                    modifier = Modifier.size(32.dp)
-                )
-            }
-
-            Text(
-                text = "No Friends Added Yet",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = SlateTextPrimary
-            )
-
-            Text(
-                text = "Messenger calling connects you directly with your friends. Search for people by username and send them a friend request to start calling!",
-                fontSize = 13.sp,
-                color = SlateTextSecondary,
-                textAlign = TextAlign.Center,
-                lineHeight = 18.sp
-            )
-
-            Button(
-                onClick = onFindFriendsClick,
-                colors = ButtonDefaults.buttonColors(containerColor = CyanAccent),
-                shape = RoundedCornerShape(12.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, tint = Color.White)
-                    Text("Find People", fontWeight = FontWeight.Bold, color = Color.White)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun UserSearchResultCard(
-    result: UserSearchResult,
-    onAddFriend: () -> Unit,
-    onAcceptRequest: () -> Unit,
-    onCancelRequest: () -> Unit,
-    onCallFriend: () -> Unit
-) {
-    val context = LocalContext.current
-    val targetUser = result.user
-
-    val decodedBitmap = remember(targetUser.avatarBase64) {
-        if (!targetUser.avatarBase64.isNullOrBlank()) {
-            try {
-                val bytes = Base64.decode(targetUser.avatarBase64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            } catch (e: Exception) {
-                null
-            }
-        } else null
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .widthIn(max = 600.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = SlateDark900),
-        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .border(1.dp, CyanGlow.copy(alpha = 0.5f), CircleShape)
-                        .background(SlateDark800),
-                    contentAlignment = Alignment.Center
-                ) {
-                    when {
-                        decodedBitmap != null -> {
-                            Image(
-                                bitmap = decodedBitmap.asImageBitmap(),
-                                contentDescription = "Avatar",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        !targetUser.photoUrl.isNullOrBlank() -> {
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(targetUser.photoUrl)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "Avatar",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        else -> {
-                            val initial = targetUser.displayName.firstOrNull()?.uppercaseChar()
-                                ?: targetUser.username.firstOrNull()?.uppercaseChar()
-                                ?: '?'
-                            Text(
-                                text = initial.toString(),
-                                color = SlateTextPrimary,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = targetUser.displayName.ifBlank { "User" },
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = SlateTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "@${targetUser.username}",
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = CyanGlow
-                    )
-                }
-            }
-
-            when (result.relationship) {
-                FriendRelationshipStatus.SELF -> {
-                    // Current user
-                    Text(
-                        text = "You",
-                        fontSize = 12.sp,
-                        color = SlateTextMuted,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-                FriendRelationshipStatus.FRIENDS -> {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(accentColor.copy(alpha = 0.2f))
+                            .border(1.dp, accentGlow.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
                     ) {
-                        Button(
-                            onClick = onCallFriend,
-                            colors = ButtonDefaults.buttonColors(containerColor = IndigoAccent),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = title,
+                            tint = accentGlow,
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = accentColor.copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, accentGlow.copy(alpha = 0.35f))
+                    ) {
+                        Text(
+                            text = badge,
+                            color = accentGlow,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = title,
+                        color = SlateTextPrimary,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = (-0.5).sp
+                    )
+                    Text(
+                        text = subtitle,
+                        color = SlateTextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    highlights.forEach { tag ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SlateDark800.copy(alpha = 0.85f)
                         ) {
-                            Icon(imageVector = Icons.Default.Videocam, contentDescription = "Call", tint = Color.White, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Call", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = tag,
+                                color = SlateTextSecondary,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
                         }
                     }
                 }
-                FriendRelationshipStatus.REQUEST_SENT -> {
-                    OutlinedButton(
-                        onClick = onCancelRequest,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = SlateTextSecondary),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, SlateDark700),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text("Requested (Cancel)", fontSize = 11.sp, color = SlateTextMuted)
-                    }
-                }
-                FriendRelationshipStatus.REQUEST_RECEIVED -> {
-                    Button(
-                        onClick = onAcceptRequest,
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldConnected),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text("Accept", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
-                }
-                FriendRelationshipStatus.NOT_FRIENDS -> {
-                    Button(
-                        onClick = onAddFriend,
-                        colors = ButtonDefaults.buttonColors(containerColor = CyanAccent),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("add_friend_button_${targetUser.username}")
-                    ) {
-                        Icon(imageVector = Icons.Default.PersonAdd, contentDescription = "Add", tint = Color.White, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Add Friend", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
+
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(accentColor, accentGlow)
+                            )
+                        )
+                ) {
+                    Text(
+                        text = actionLabel,
+                        color = SlateDark950,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.8.sp
+                    )
                 }
             }
         }
@@ -1612,230 +684,57 @@ private fun UserSearchResultCard(
 }
 
 @Composable
-private fun IncomingRequestCard(
-    request: FriendRequest,
-    onAccept: () -> Unit,
-    onReject: () -> Unit
+private fun SignalingSettingsDialog(
+    currentUrl: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
 ) {
-    val context = LocalContext.current
+    var urlText by remember { mutableStateOf(currentUrl) }
 
-    val decodedBitmap = remember(request.senderAvatarBase64) {
-        if (!request.senderAvatarBase64.isNullOrBlank()) {
-            try {
-                val bytes = Base64.decode(request.senderAvatarBase64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            } catch (e: Exception) {
-                null
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SlateDark900,
+        title = {
+            Text(
+                text = "Signaling Server (Optional)",
+                color = SlateTextPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Leave blank to use the built-in zero-config signaling server, or enter your own Firebase Realtime Database URL.",
+                    color = SlateTextSecondary,
+                    fontSize = 13.sp
+                )
+                OutlinedTextField(
+                    value = urlText,
+                    onValueChange = { urlText = it },
+                    singleLine = true,
+                    placeholder = { Text("https://your-project-default-rtdb.firebaseio.com", color = SlateTextMuted, fontSize = 12.sp) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyanGlow,
+                        unfocusedBorderColor = SlateDark700,
+                        focusedTextColor = SlateTextPrimary,
+                        unfocusedTextColor = SlateTextPrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
-        } else null
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .widthIn(max = 600.dp)
-            .testTag("incoming_request_${request.senderUsername}"),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = SlateDark900),
-        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f)
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(urlText) },
+                colors = ButtonDefaults.buttonColors(containerColor = CyanAccent)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .border(1.dp, CyanGlow.copy(alpha = 0.5f), CircleShape)
-                        .background(SlateDark800),
-                    contentAlignment = Alignment.Center
-                ) {
-                    when {
-                        decodedBitmap != null -> {
-                            Image(
-                                bitmap = decodedBitmap.asImageBitmap(),
-                                contentDescription = "Avatar",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        !request.senderPhotoUrl.isNullOrBlank() -> {
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(request.senderPhotoUrl)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "Avatar",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        else -> {
-                            val initial = request.senderDisplayName.firstOrNull()?.uppercaseChar()
-                                ?: request.senderUsername.firstOrNull()?.uppercaseChar()
-                                ?: '?'
-                            Text(
-                                text = initial.toString(),
-                                color = SlateTextPrimary,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = request.senderDisplayName.ifBlank { "User" },
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = SlateTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "@${request.senderUsername}",
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = CyanGlow
-                    )
-                }
+                Text("Save", color = SlateDark950, fontWeight = FontWeight.Bold)
             }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Button(
-                    onClick = onAccept,
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldConnected),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    modifier = Modifier.testTag("accept_request_${request.senderUsername}")
-                ) {
-                    Text("Accept", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                }
-
-                OutlinedButton(
-                    onClick = onReject,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = RoseDestructive),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, RoseDestructive.copy(alpha = 0.5f)),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text("Decline", fontSize = 12.sp, color = RoseDestructive)
-                }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = SlateTextSecondary)
             }
         }
-    }
-}
-
-@Composable
-private fun OutgoingRequestCard(
-    request: FriendRequest,
-    onCancel: () -> Unit
-) {
-    val context = LocalContext.current
-
-    val decodedBitmap = remember(request.receiverAvatarBase64) {
-        if (!request.receiverAvatarBase64.isNullOrBlank()) {
-            try {
-                val bytes = Base64.decode(request.receiverAvatarBase64, Base64.DEFAULT)
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            } catch (e: Exception) {
-                null
-            }
-        } else null
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .widthIn(max = 600.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = SlateDark900),
-        border = androidx.compose.foundation.BorderStroke(1.dp, GlassDarkBorder)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .border(1.dp, GlassDarkBorder, CircleShape)
-                        .background(SlateDark800),
-                    contentAlignment = Alignment.Center
-                ) {
-                    when {
-                        decodedBitmap != null -> {
-                            Image(
-                                bitmap = decodedBitmap.asImageBitmap(),
-                                contentDescription = "Avatar",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        !request.receiverPhotoUrl.isNullOrBlank() -> {
-                            AsyncImage(
-                                model = ImageRequest.Builder(context)
-                                    .data(request.receiverPhotoUrl)
-                                    .crossfade(true)
-                                    .build(),
-                                contentDescription = "Avatar",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        else -> {
-                            val initial = request.receiverDisplayName.firstOrNull()?.uppercaseChar()
-                                ?: request.receiverUsername.firstOrNull()?.uppercaseChar()
-                                ?: '?'
-                            Text(
-                                text = initial.toString(),
-                                color = SlateTextPrimary,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = request.receiverDisplayName.ifBlank { "User" },
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = SlateTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "@${request.receiverUsername} • Request Pending",
-                        fontSize = 11.sp,
-                        color = SlateTextMuted
-                    )
-                }
-            }
-
-            TextButton(onClick = onCancel) {
-                Text("Cancel", fontSize = 12.sp, color = RoseDestructive)
-            }
-        }
-    }
+    )
 }

@@ -12,6 +12,7 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -21,66 +22,58 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.example.auth.AuthUiState
-import com.example.auth.FriendsViewModel
-import com.example.ui.screens.CallScreen
+import com.example.ui.screens.BroadcastScreen
 import com.example.ui.screens.HomeScreen
-import com.example.ui.screens.IncomingCallScreen
-import com.example.ui.screens.LoginScreen
-import com.example.ui.screens.ProfileSetupScreen
-import com.example.ui.theme.CyanGlow
+import com.example.ui.screens.ViewerScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.RoseDestructive
 import com.example.ui.theme.SlateDark950
-import com.example.viewmodel.AuthViewModel
 import com.example.viewmodel.CallState
 import com.example.viewmodel.CallViewModel
+import com.example.viewmodel.SurveillanceMode
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val callViewModel: CallViewModel by viewModels()
-    private val authViewModel: AuthViewModel by viewModels()
-    private val friendsViewModel: FriendsViewModel by viewModels()
 
     companion object {
-        const val ACTION_PIP_END_CALL = "com.example.action.PIP_END_CALL"
-        const val ACTION_PIP_TOGGLE_MIC = "com.example.action.PIP_TOGGLE_MIC"
+        const val ACTION_PIP_STOP = "com.example.action.PIP_STOP"
+        const val ACTION_PIP_TOGGLE_AUDIO = "com.example.action.PIP_TOGGLE_AUDIO"
         const val ACTION_PIP_TOGGLE_SPEAKER = "com.example.action.PIP_TOGGLE_SPEAKER"
     }
 
     private val pipReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                ACTION_PIP_END_CALL -> {
-                    callViewModel.endCall()
+                ACTION_PIP_STOP -> {
+                    callViewModel.stopSession()
                 }
-                ACTION_PIP_TOGGLE_MIC -> {
-                    callViewModel.toggleMicrophone()
+                ACTION_PIP_TOGGLE_AUDIO -> {
+                    if (callViewModel.surveillanceMode.value == SurveillanceMode.VIEW) {
+                        callViewModel.toggleRemoteAudio()
+                    } else {
+                        callViewModel.toggleMicrophone()
+                    }
                     updatePipParamsIfPossible()
                 }
                 ACTION_PIP_TOGGLE_SPEAKER -> {
@@ -96,8 +89,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val filter = IntentFilter().apply {
-            addAction(ACTION_PIP_END_CALL)
-            addAction(ACTION_PIP_TOGGLE_MIC)
+            addAction(ACTION_PIP_STOP)
+            addAction(ACTION_PIP_TOGGLE_AUDIO)
             addAction(ACTION_PIP_TOGGLE_SPEAKER)
         }
 
@@ -107,13 +100,18 @@ class MainActivity : ComponentActivity() {
             registerReceiver(pipReceiver, filter)
         }
 
-        // Keep PiP actions and auto-enter params in sync with ViewModel state
+        // Sync PiP params & keep-screen-on with active surveillance session
         lifecycleScope.launch {
             combine(
-                callViewModel.callState,
-                callViewModel.isMicEnabled,
+                callViewModel.surveillanceMode,
+                callViewModel.isRemoteAudioMuted,
                 callViewModel.audioManager.isSpeakerOn
-            ) { _, _, _ ->
+            ) { mode, _, _ ->
+                if (mode != SurveillanceMode.NONE) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
                 updatePipParamsIfPossible()
             }.collect {}
         }
@@ -124,10 +122,8 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = SlateDark950
                 ) {
-                    MainApp(
+                    SurveillanceApp(
                         viewModel = callViewModel,
-                        authViewModel = authViewModel,
-                        friendsViewModel = friendsViewModel,
                         onEnterPip = { enterPipMode() }
                     )
                 }
@@ -139,16 +135,15 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         try {
             unregisterReceiver(pipReceiver)
-        } catch (e: Exception) {
-            // Receiver might not be registered
+        } catch (_: Exception) {
+            // Receiver already unregistered
         }
     }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        val state = callViewModel.callState.value
-        val isInCall = state !is CallState.Idle && state !is CallState.Ended
-        if (isInCall) {
+        // Auto-enter PiP when leaving the app in View mode so user can keep watching feed
+        if (callViewModel.surveillanceMode.value == SurveillanceMode.VIEW) {
             enterPipMode()
         }
     }
@@ -159,7 +154,7 @@ class MainActivity : ComponentActivity() {
         callViewModel.setInPipMode(isInPictureInPictureMode)
     }
 
-    fun enterPipMode() {
+    private fun enterPipMode() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
                 enterPictureInPictureMode(buildPipParams())
@@ -173,65 +168,62 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
                 setPictureInPictureParams(buildPipParams())
-            } catch (e: Exception) {
-                // Ignore if not supported or not ready
+            } catch (_: Exception) {
+                // Ignore if PiP not ready
             }
         }
     }
 
     private fun buildPipParams(): PictureInPictureParams {
-        val isMicEnabled = callViewModel.isMicEnabled.value
+        val isAudioMuted = callViewModel.isRemoteAudioMuted.value
         val isSpeakerOn = callViewModel.audioManager.isSpeakerOn.value
 
         val actions = mutableListOf<RemoteAction>()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // 1. Mic toggle action (Mute / Unmute)
-            val micIntent = Intent(ACTION_PIP_TOGGLE_MIC).setPackage(packageName)
-            val micPendingIntent = PendingIntent.getBroadcast(
-                this, 101, micIntent,
+            val audioIntent = Intent(ACTION_PIP_TOGGLE_AUDIO).setPackage(packageName)
+            val audioPending = PendingIntent.getBroadcast(
+                this, 101, audioIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            val micIconRes = if (isMicEnabled) R.drawable.ic_pip_mic_on else R.drawable.ic_pip_mic_off
-            val micTitle = if (isMicEnabled) "Mute" else "Unmute"
+            val audioIcon = if (isAudioMuted) R.drawable.ic_pip_mic_off else R.drawable.ic_pip_mic_on
+            val audioTitle = if (isAudioMuted) "Unmute" else "Mute"
             actions.add(
                 RemoteAction(
-                    Icon.createWithResource(this, micIconRes),
-                    micTitle,
-                    micTitle,
-                    micPendingIntent
+                    Icon.createWithResource(this, audioIcon),
+                    audioTitle,
+                    audioTitle,
+                    audioPending
                 )
             )
 
-            // 2. Speaker toggle action (Speaker / Earpiece)
             val speakerIntent = Intent(ACTION_PIP_TOGGLE_SPEAKER).setPackage(packageName)
-            val speakerPendingIntent = PendingIntent.getBroadcast(
+            val speakerPending = PendingIntent.getBroadcast(
                 this, 102, speakerIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            val speakerIconRes = if (isSpeakerOn) R.drawable.ic_pip_speaker_on else R.drawable.ic_pip_speaker_off
+            val speakerIcon = if (isSpeakerOn) R.drawable.ic_pip_speaker_on else R.drawable.ic_pip_speaker_off
             val speakerTitle = if (isSpeakerOn) "Speaker" else "Earpiece"
             actions.add(
                 RemoteAction(
-                    Icon.createWithResource(this, speakerIconRes),
+                    Icon.createWithResource(this, speakerIcon),
                     speakerTitle,
                     speakerTitle,
-                    speakerPendingIntent
+                    speakerPending
                 )
             )
 
-            // 3. End Call action
-            val endCallIntent = Intent(ACTION_PIP_END_CALL).setPackage(packageName)
-            val endCallPendingIntent = PendingIntent.getBroadcast(
-                this, 103, endCallIntent,
+            val stopIntent = Intent(ACTION_PIP_STOP).setPackage(packageName)
+            val stopPending = PendingIntent.getBroadcast(
+                this, 103, stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             actions.add(
                 RemoteAction(
                     Icon.createWithResource(this, R.drawable.ic_pip_call_end),
-                    "End Call",
-                    "End Call",
-                    endCallPendingIntent
+                    "Stop",
+                    "Stop",
+                    stopPending
                 )
             )
         }
@@ -241,13 +233,11 @@ class MainActivity : ComponentActivity() {
                 .setAspectRatio(Rational(9, 16))
                 .setActions(actions)
         } else {
-            error("PiP is only supported on Android 8.0+")
+            error("PiP requires Android 8.0+")
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val isInCall = callViewModel.callState.value !is CallState.Idle &&
-                    callViewModel.callState.value !is CallState.Ended
-            builder.setAutoEnterEnabled(isInCall)
+            builder.setAutoEnterEnabled(callViewModel.surveillanceMode.value == SurveillanceMode.VIEW)
         }
 
         return builder.build()
@@ -255,178 +245,96 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainApp(
+fun SurveillanceApp(
     viewModel: CallViewModel,
-    authViewModel: AuthViewModel,
-    friendsViewModel: FriendsViewModel,
     onEnterPip: () -> Unit = {}
 ) {
-    val authState by authViewModel.authState.collectAsState()
+    val surveillanceMode by viewModel.surveillanceMode.collectAsState()
     val callState by viewModel.callState.collectAsState()
-    val incomingCallInvitation by viewModel.friendsRepository.incomingCall.collectAsState()
+    val isInPipMode by viewModel.isInPipMode.collectAsState()
 
-    var isEditingProfile by remember { mutableStateOf(false) }
-    var showEndCallConfirmDialog by remember { mutableStateOf(false) }
+    var showStopConfirmDialog by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-
-    val isInCall = callState !is CallState.Idle && callState !is CallState.Ended
-    val hasActiveIncomingCall = incomingCallInvitation != null &&
-            incomingCallInvitation?.status == "ringing" &&
-            !isInCall
 
     LaunchedEffect(callState) {
         when (val state = callState) {
-            is CallState.Ended -> {
-                // Return to home on call end
-                viewModel.resetToIdle()
-            }
-            is CallState.Error -> {
-                errorMessage = state.message
-            }
+            is CallState.Ended -> viewModel.resetToIdle()
+            is CallState.Error -> errorMessage = state.message
             else -> {}
         }
     }
 
-    // Intercept back press when on active call, incoming call, or editing profile
-    BackHandler(enabled = isInCall || isEditingProfile || hasActiveIncomingCall) {
-        when {
-            hasActiveIncomingCall -> {
-                incomingCallInvitation?.let { viewModel.rejectIncomingCall(it) }
-            }
-            isInCall -> {
-                showEndCallConfirmDialog = true
-            }
-            isEditingProfile -> {
-                isEditingProfile = false
-            }
+    val isSessionActive = surveillanceMode != SurveillanceMode.NONE
+
+    BackHandler(enabled = isSessionActive) {
+        if (viewModel.isStealthMode.value) {
+            viewModel.toggleStealthMode(false)
+        } else {
+            showStopConfirmDialog = true
         }
     }
 
     AnimatedContent(
-        targetState = authState,
-        transitionSpec = {
-            fadeIn() togetherWith fadeOut()
-        },
-        label = "auth_and_app_navigation"
-    ) { currentAuthState ->
-        when (currentAuthState) {
-            is AuthUiState.Loading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(SlateDark950),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(
-                        color = CyanGlow,
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(44.dp)
-                    )
-                }
-            }
-            is AuthUiState.Unauthenticated -> {
-                LoginScreen(authViewModel = authViewModel)
-            }
-            is AuthUiState.NeedsProfileSetup -> {
-                ProfileSetupScreen(
-                    authViewModel = authViewModel,
-                    suggestedDisplayName = currentAuthState.suggestedDisplayName,
-                    suggestedPhotoUrl = currentAuthState.suggestedPhotoUrl,
-                    onProfileCompleted = {
-                        // Successfully completed profile
+        targetState = surveillanceMode,
+        transitionSpec = { fadeIn() togetherWith fadeOut() },
+        label = "surveillance_mode_navigation"
+    ) { mode ->
+        when (mode) {
+            SurveillanceMode.NONE -> {
+                HomeScreen(
+                    viewModel = viewModel,
+                    onStartBroadcast = { channelId, enableAudio ->
+                        viewModel.startBroadcast(channelId, enableAudio)
+                    },
+                    onStartView = { channelId ->
+                        viewModel.startViewing(channelId)
                     }
                 )
             }
-            is AuthUiState.Authenticated -> {
-                // Sync profile to call signaling and friends repo
-                LaunchedEffect(currentAuthState.profile) {
-                    viewModel.friendsRepository.setupPresence(currentAuthState.profile.uid)
-                    viewModel.friendsRepository.startListeningForIncomingCalls(currentAuthState.profile.uid)
-                    friendsViewModel.setUserProfile(currentAuthState.profile)
-                }
-
-                if (isEditingProfile) {
-                    ProfileSetupScreen(
-                        authViewModel = authViewModel,
-                        suggestedDisplayName = currentAuthState.profile.displayName,
-                        suggestedPhotoUrl = currentAuthState.profile.photoUrl,
-                        isEditMode = true,
-                        existingProfile = currentAuthState.profile,
-                        onProfileCompleted = {
-                            isEditingProfile = false
-                        }
-                    )
-                } else if (hasActiveIncomingCall && incomingCallInvitation != null) {
-                    // Full-screen Messenger style incoming call screen
-                    IncomingCallScreen(
-                        invitation = incomingCallInvitation!!,
-                        onAccept = {
-                            viewModel.acceptIncomingCall(incomingCallInvitation!!)
-                        },
-                        onDecline = {
-                            viewModel.rejectIncomingCall(incomingCallInvitation!!)
-                        }
-                    )
-                } else {
-                    AnimatedContent(
-                        targetState = isInCall,
-                        transitionSpec = {
-                            fadeIn() togetherWith fadeOut()
-                        },
-                        label = "call_navigation"
-                    ) { inCall ->
-                        if (inCall) {
-                            CallScreen(
-                                viewModel = viewModel,
-                                onEndCall = {
-                                    viewModel.endCall()
-                                },
-                                onEnterPip = onEnterPip
-                            )
-                        } else {
-                            HomeScreen(
-                                viewModel = viewModel,
-                                authViewModel = authViewModel,
-                                friendsViewModel = friendsViewModel,
-                                onOpenProfileEdit = { isEditingProfile = true },
-                                onDirectCallFriend = { friend ->
-                                    // Direct call started inside HomeScreen via viewModel.startDirectCall
-                                },
-                                onCreateCall = { roomId ->
-                                    viewModel.createRoom(roomId)
-                                },
-                                onJoinCall = { roomId ->
-                                    viewModel.joinRoom(roomId)
-                                }
-                            )
-                        }
-                    }
-                }
+            SurveillanceMode.BROADCAST -> {
+                BroadcastScreen(
+                    viewModel = viewModel,
+                    onStopBroadcast = { viewModel.stopSession() }
+                )
+            }
+            SurveillanceMode.VIEW -> {
+                ViewerScreen(
+                    viewModel = viewModel,
+                    onStopViewing = { viewModel.stopSession() },
+                    onEnterPip = onEnterPip
+                )
             }
         }
     }
 
-    val isInPipMode by viewModel.isInPipMode.collectAsState()
-
-    if (!isInPipMode && showEndCallConfirmDialog) {
+    if (!isInPipMode && showStopConfirmDialog) {
+        val isBroadcast = surveillanceMode == SurveillanceMode.BROADCAST
         AlertDialog(
-            onDismissRequest = { showEndCallConfirmDialog = false },
-            title = { Text("End Call?") },
-            text = { Text("Are you sure you want to disconnect from this call?") },
+            onDismissRequest = { showStopConfirmDialog = false },
+            title = { Text(if (isBroadcast) "Stop Broadcast?" else "Stop Viewing?") },
+            text = {
+                Text(
+                    if (isBroadcast) {
+                        "This will turn off the camera stream for any connected viewer."
+                    } else {
+                        "Disconnect from the live camera feed? Any active recording will be saved automatically."
+                    }
+                )
+            },
             confirmButton = {
                 Button(
                     onClick = {
-                        showEndCallConfirmDialog = false
-                        viewModel.endCall()
+                        showStopConfirmDialog = false
+                        viewModel.stopSession()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = RoseDestructive)
                 ) {
-                    Text("End Call", color = Color.White)
+                    Text(if (isBroadcast) "Stop Broadcast" else "Stop Viewing", color = Color.White)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showEndCallConfirmDialog = false }) {
-                    Text("Stay in Call")
+                TextButton(onClick = { showStopConfirmDialog = false }) {
+                    Text("Keep Running")
                 }
             }
         )
@@ -436,15 +344,15 @@ fun MainApp(
         AlertDialog(
             onDismissRequest = {
                 errorMessage = null
-                viewModel.resetToIdle()
+                viewModel.stopSession()
             },
-            title = { Text("Call Error") },
-            text = { Text(errorMessage ?: "An unexpected error occurred") },
+            title = { Text("Stream Notice") },
+            text = { Text(errorMessage ?: "Connection interrupted") },
             confirmButton = {
                 Button(
                     onClick = {
                         errorMessage = null
-                        viewModel.resetToIdle()
+                        viewModel.stopSession()
                     }
                 ) {
                     Text("OK")
@@ -453,4 +361,3 @@ fun MainApp(
         )
     }
 }
-

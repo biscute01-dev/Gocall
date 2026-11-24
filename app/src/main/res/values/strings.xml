@@ -1,3 +1,11 @@
 <resources>
-    <string name="app_name">Video Call</string>
+    <string name="app_name">CamGuard</string>
+    <string name="mode_broadcast_title">Broadcast</string>
+    <string name="mode_broadcast_subtitle">Use this device as a live surveillance camera</string>
+    <string name="mode_view_title">View</string>
+    <string name="mode_view_subtitle">Watch live camera feed &amp; record HD video</string>
+    <string name="channel_label">Camera Channel Code</string>
+    <string name="channel_hint">Enter channel code (e.g. cam-01)</string>
+    <string name="stop_broadcast">Stop Broadcast</string>
+    <string name="stop_viewing">Stop Viewing</string>
 </resources>

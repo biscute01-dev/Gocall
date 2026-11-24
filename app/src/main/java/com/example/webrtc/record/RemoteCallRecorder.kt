@@ -83,8 +83,8 @@ class RemoteCallRecorder(
 
         try {
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val roomTag = if (!roomId.isNullOrBlank()) "Room_${roomId}_" else ""
-            val fileName = "RemoteCall_${roomTag}${timestamp}.mp4"
+            val roomTag = if (!roomId.isNullOrBlank()) "${roomId}_" else ""
+            val fileName = "CamGuard_${roomTag}${timestamp}.mp4"
 
             // Temp recording file in cache/external files directory
             val moviesDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir
@@ -208,7 +208,7 @@ class RemoteCallRecorder(
                 put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
                 put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/GoCall")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/CamGuard")
                     put(MediaStore.Video.Media.IS_PENDING, 1)
                 }
             }

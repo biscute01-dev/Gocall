@@ -1,7 +1,6 @@
 package com.example.signaling
 
 import android.util.Log
-import com.google.firebase.FirebaseApp
 import com.google.firebase.database.ChildEventListener
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
@@ -42,16 +41,21 @@ class SignalingClient(
         .build()
 
     private var currentRoomId: String? = null
-    private var isCaller: Boolean = false
+    private var isBroadcaster: Boolean = false
     private var firebaseDb: FirebaseDatabase? = null
     private var roomRef: DatabaseReference? = null
 
-    private var offerAnswerListener: ValueEventListener? = null
+    private var roomValueListener: ValueEventListener? = null
     private var candidatesListener: ChildEventListener? = null
-    private var statusListener: ValueEventListener? = null
 
     private var restPollingJob: Job? = null
     private val processedCandidateKeys = mutableSetOf<String>()
+
+    // Deduplication guards so RTDB snapshots don't re-apply identical SDPs or events
+    private var lastAppliedAnswerSdp: String? = null
+    private var lastAppliedOfferSessionKey: String? = null
+    private var lastAppliedReconnectTs: Long = 0L
+    private var hasNotifiedViewerLeftForSession: Boolean = false
 
     init {
         initFirebaseDatabase()
@@ -79,76 +83,78 @@ class SignalingClient(
         }
     }
 
-    fun createRoom(roomId: String, sdpOffer: String) {
-        this.currentRoomId = roomId
-        this.isCaller = true
+    /**
+     * Publishes a live surveillance broadcast offer on `rooms/{channelId}`.
+     * Clears any previous viewer answer/candidates so a fresh viewer can connect immediately.
+     */
+    fun startBroadcast(channelId: String, sdpOffer: String, sessionId: String) {
+        cleanupListenersOnly()
+        this.currentRoomId = channelId
+        this.isBroadcaster = true
         processedCandidateKeys.clear()
+        lastAppliedAnswerSdp = null
+        lastAppliedOfferSessionKey = null
+        hasNotifiedViewerLeftForSession = false
 
         val offerMap = mapOf(
             "sdp" to sdpOffer,
-            "type" to "OFFER"
+            "type" to "OFFER",
+            "sessionId" to sessionId
         )
         val roomMap = mapOf(
             "caller" to offerMap,
-            "status" to "calling",
+            "status" to "broadcasting",
+            "sessionId" to sessionId,
             "createdAt" to System.currentTimeMillis()
         )
 
         val db = firebaseDb
         if (db != null) {
             try {
-                val ref = db.getReference("rooms").child(roomId)
+                val ref = db.getReference("rooms").child(channelId)
                 roomRef = ref
                 ref.setValue(roomMap).addOnSuccessListener {
-                    Log.d(TAG, "Room $roomId created on Firebase RTDB")
-                    listenForCalleeAnswer(ref)
-                    listenForCalleeCandidates(ref)
-                    listenForRoomStatus(ref)
+                    Log.d(TAG, "Broadcast channel $channelId live on Firebase RTDB (session=$sessionId)")
+                    listenAsBroadcaster(ref)
+                    listenForRemoteCandidates(ref, childPath = "calleeCandidates", isCallerCandidate = false)
                 }.addOnFailureListener { err ->
-                    Log.w(TAG, "Firebase SDK setValue failed: ${err.message}. Starting REST sync...")
-                    fallbackRestCreateRoom(roomId, offerMap)
+                    Log.w(TAG, "Firebase SDK setValue failed: ${err.message}. Falling back to REST...")
+                    fallbackRestStartBroadcast(channelId, roomMap)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Firebase error, using REST: ${e.message}")
-                fallbackRestCreateRoom(roomId, offerMap)
+                fallbackRestStartBroadcast(channelId, roomMap)
             }
         } else {
-            fallbackRestCreateRoom(roomId, offerMap)
+            fallbackRestStartBroadcast(channelId, roomMap)
         }
     }
 
-    fun joinRoom(roomId: String, onOfferReceived: (String) -> Unit) {
-        this.currentRoomId = roomId
-        this.isCaller = false
+    /**
+     * Joins a surveillance channel as a Viewer (recvonly).
+     * Automatically waits if the Broadcaster hasn't started yet and connects the moment an offer appears!
+     */
+    fun joinAsViewer(channelId: String) {
+        cleanupListenersOnly()
+        this.currentRoomId = channelId
+        this.isBroadcaster = false
         processedCandidateKeys.clear()
+        lastAppliedOfferSessionKey = null
+        lastAppliedReconnectTs = 0L
 
         val db = firebaseDb
         if (db != null) {
             try {
-                val ref = db.getReference("rooms").child(roomId)
+                val ref = db.getReference("rooms").child(channelId)
                 roomRef = ref
-                ref.child("caller").addListenerForSingleValueEvent(object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val sdp = snapshot.child("sdp").getValue(String::class.java)
-                        if (sdp != null) {
-                            onOfferReceived(sdp)
-                            listenForCallerCandidates(ref)
-                            listenForRoomStatus(ref)
-                        } else {
-                            // Try REST fallback fetch
-                            fallbackRestFetchOffer(roomId, onOfferReceived)
-                        }
-                    }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        fallbackRestFetchOffer(roomId, onOfferReceived)
-                    }
-                })
+                listenAsViewer(ref)
+                listenForRemoteCandidates(ref, childPath = "callerCandidates", isCallerCandidate = true)
             } catch (e: Exception) {
-                fallbackRestFetchOffer(roomId, onOfferReceived)
+                Log.w(TAG, "Firebase viewer error, using REST polling: ${e.message}")
+                startRestPolling(channelId)
             }
         } else {
-            fallbackRestFetchOffer(roomId, onOfferReceived)
+            startRestPolling(channelId)
         }
     }
 
@@ -156,7 +162,8 @@ class SignalingClient(
         val roomId = currentRoomId ?: return
         val answerMap = mapOf(
             "sdp" to sdpAnswer,
-            "type" to "ANSWER"
+            "type" to "ANSWER",
+            "timestamp" to System.currentTimeMillis()
         )
 
         val ref = roomRef
@@ -179,7 +186,7 @@ class SignalingClient(
             "serverUrl" to (candidate.serverUrl ?: "")
         )
 
-        val targetPath = if (isCaller) "callerCandidates" else "calleeCandidates"
+        val targetPath = if (isBroadcaster) "callerCandidates" else "calleeCandidates"
         val ref = roomRef
         if (ref != null) {
             ref.child(targetPath).push().setValue(candidateMap)
@@ -189,12 +196,14 @@ class SignalingClient(
         }
     }
 
-    fun sendReconnectOffer(sdpOffer: String) {
+    fun sendReconnectOffer(sdpOffer: String, sessionId: String) {
         val roomId = currentRoomId ?: return
+        val ts = System.currentTimeMillis()
         val offerMap = mapOf(
             "sdp" to sdpOffer,
             "type" to "OFFER",
-            "reconnectTimestamp" to System.currentTimeMillis()
+            "sessionId" to sessionId,
+            "reconnectTimestamp" to ts
         )
         val ref = roomRef
         if (ref != null) {
@@ -217,7 +226,7 @@ class SignalingClient(
 
     fun updateMediaState(isCameraEnabled: Boolean, isMicEnabled: Boolean) {
         val roomId = currentRoomId ?: return
-        val targetPath = if (isCaller) "callerMedia" else "calleeMedia"
+        val targetPath = if (isBroadcaster) "callerMedia" else "calleeMedia"
         val stateMap = mapOf(
             "cameraEnabled" to isCameraEnabled,
             "micEnabled" to isMicEnabled
@@ -228,92 +237,30 @@ class SignalingClient(
         }
     }
 
-    private fun listenForCalleeAnswer(ref: DatabaseReference) {
+    private fun listenAsBroadcaster(ref: DatabaseReference) {
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
+                if (!snapshot.exists()) return
+
+                // 1. Check incoming viewer answer
                 val calleeSnap = snapshot.child("callee")
-                val sdp = calleeSnap.child("sdp").getValue(String::class.java)
-                if (!sdp.isNullOrBlank()) {
+                val answerSdp = calleeSnap.child("sdp").getValue(String::class.java)
+                if (!answerSdp.isNullOrBlank() && answerSdp != lastAppliedAnswerSdp) {
+                    lastAppliedAnswerSdp = answerSdp
                     scope.launch {
-                        _events.emit(SignalingEvent.AnswerReceived(sdp))
+                        _events.emit(SignalingEvent.AnswerReceived(answerSdp))
                     }
                 }
-            }
 
-            override fun onCancelled(error: DatabaseError) {
-                Log.w(TAG, "listenForCalleeAnswer onCancelled: ${error.message}")
-            }
-        }
-        offerAnswerListener = listener
-        ref.addValueEventListener(listener)
-    }
-
-    private fun listenForCalleeCandidates(ref: DatabaseReference) {
-        val listener = object : ChildEventListener {
-            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                val key = snapshot.key ?: return
-                if (processedCandidateKeys.add("callee_$key")) {
-                    val sdp = snapshot.child("sdp").getValue(String::class.java) ?: return
-                    val sdpMid = snapshot.child("sdpMid").getValue(String::class.java)
-                    val sdpMLineIndex = snapshot.child("sdpMLineIndex").getValue(Int::class.java) ?: 0
-                    val serverUrl = snapshot.child("serverUrl").getValue(String::class.java)
-                    val candidate = IceCandidateModel(sdp, sdpMid, sdpMLineIndex, serverUrl)
-                    scope.launch {
-                        _events.emit(SignalingEvent.IceCandidateReceived(candidate, isCallerCandidate = false))
-                    }
-                }
-            }
-            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
-            override fun onChildRemoved(snapshot: DataSnapshot) {}
-            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-            override fun onCancelled(error: DatabaseError) {}
-        }
-        candidatesListener = listener
-        ref.child("calleeCandidates").addChildEventListener(listener)
-    }
-
-    private fun listenForCallerCandidates(ref: DatabaseReference) {
-        val listener = object : ChildEventListener {
-            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                val key = snapshot.key ?: return
-                if (processedCandidateKeys.add("caller_$key")) {
-                    val sdp = snapshot.child("sdp").getValue(String::class.java) ?: return
-                    val sdpMid = snapshot.child("sdpMid").getValue(String::class.java)
-                    val sdpMLineIndex = snapshot.child("sdpMLineIndex").getValue(Int::class.java) ?: 0
-                    val serverUrl = snapshot.child("serverUrl").getValue(String::class.java)
-                    val candidate = IceCandidateModel(sdp, sdpMid, sdpMLineIndex, serverUrl)
-                    scope.launch {
-                        _events.emit(SignalingEvent.IceCandidateReceived(candidate, isCallerCandidate = true))
-                    }
-                }
-            }
-            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
-            override fun onChildRemoved(snapshot: DataSnapshot) {}
-            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-            override fun onCancelled(error: DatabaseError) {}
-        }
-        candidatesListener = listener
-        ref.child("callerCandidates").addChildEventListener(listener)
-    }
-
-    private fun listenForRoomStatus(ref: DatabaseReference) {
-        val listener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
+                // 2. Check channel status
                 val status = snapshot.child("status").getValue(String::class.java)
                 when (status) {
-                    "ended" -> {
-                        scope.launch {
-                            _events.emit(SignalingEvent.PeerDisconnected("Call ended by peer"))
-                        }
-                    }
-                    "rejected" -> {
-                        scope.launch {
-                            _events.emit(SignalingEvent.PeerDisconnected("Call declined"))
-                        }
-                    }
-                    "cancelled" -> {
-                        scope.launch {
-                            _events.emit(SignalingEvent.PeerDisconnected("Call was cancelled"))
+                    "viewer_left" -> {
+                        if (!hasNotifiedViewerLeftForSession) {
+                            hasNotifiedViewerLeftForSession = true
+                            scope.launch {
+                                _events.emit(SignalingEvent.ViewerLeft(System.currentTimeMillis()))
+                            }
                         }
                     }
                     "reconnecting" -> {
@@ -322,22 +269,110 @@ class SignalingClient(
                         }
                     }
                 }
+            }
 
-                // Check peer media state (camera on/off, mic on/off)
-                val peerMediaPath = if (isCaller) "calleeMedia" else "callerMedia"
-                val peerMediaSnap = snapshot.child(peerMediaPath)
-                if (peerMediaSnap.exists()) {
-                    val cameraEnabled = peerMediaSnap.child("cameraEnabled").getValue(Boolean::class.java) ?: true
-                    val micEnabled = peerMediaSnap.child("micEnabled").getValue(Boolean::class.java) ?: true
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "listenAsBroadcaster onCancelled: ${error.message}")
+                currentRoomId?.let { startRestPolling(it) }
+            }
+        }
+        roomValueListener = listener
+        ref.addValueEventListener(listener)
+    }
+
+    private fun listenAsViewer(ref: DatabaseReference) {
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (!snapshot.exists()) return
+
+                val status = snapshot.child("status").getValue(String::class.java) ?: ""
+                val callerSnap = snapshot.child("caller")
+                val offerSdp = callerSnap.child("sdp").getValue(String::class.java)
+                val sessionId = callerSnap.child("sessionId").getValue(String::class.java) ?: ""
+                val reconnectTs = callerSnap.child("reconnectTimestamp").getValue(Long::class.java) ?: 0L
+
+                // Handle broadcaster stopped
+                if (status == "ended" && lastAppliedOfferSessionKey != null) {
+                    lastAppliedOfferSessionKey = null
                     scope.launch {
-                        _events.emit(SignalingEvent.PeerMediaStateChanged(isCameraEnabled = cameraEnabled, isMicEnabled = micEnabled))
+                        _events.emit(SignalingEvent.PeerDisconnected("Broadcast stopped by camera"))
+                    }
+                    return
+                }
+
+                // Check broadcaster media state (camera paused / mic muted)
+                val mediaSnap = snapshot.child("callerMedia")
+                if (mediaSnap.exists()) {
+                    val cameraEnabled = mediaSnap.child("cameraEnabled").getValue(Boolean::class.java) ?: true
+                    val micEnabled = mediaSnap.child("micEnabled").getValue(Boolean::class.java) ?: true
+                    scope.launch {
+                        _events.emit(SignalingEvent.PeerMediaStateChanged(cameraEnabled, micEnabled))
+                    }
+                }
+
+                // Pick up fresh broadcast offer OR reconnect offer
+                if (!offerSdp.isNullOrBlank() && (status == "broadcasting" || status == "reconnecting" || status == "calling")) {
+                    val isReconnect = reconnectTs > 0L && reconnectTs != lastAppliedReconnectTs
+                    val offerKey = "${sessionId}_${reconnectTs}_${offerSdp.hashCode()}"
+                    if (offerKey != lastAppliedOfferSessionKey) {
+                        lastAppliedOfferSessionKey = offerKey
+                        if (reconnectTs > 0L) {
+                            lastAppliedReconnectTs = reconnectTs
+                        }
+                        if (status == "reconnecting") {
+                            scope.launch {
+                                _events.emit(SignalingEvent.ReconnectRequested(System.currentTimeMillis()))
+                            }
+                        }
+                        scope.launch {
+                            _events.emit(
+                                SignalingEvent.OfferReceived(
+                                    sdp = offerSdp,
+                                    sessionId = sessionId,
+                                    isReconnect = isReconnect
+                                )
+                            )
+                        }
                     }
                 }
             }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "listenAsViewer onCancelled: ${error.message}")
+                currentRoomId?.let { startRestPolling(it) }
+            }
+        }
+        roomValueListener = listener
+        ref.addValueEventListener(listener)
+    }
+
+    private fun listenForRemoteCandidates(
+        ref: DatabaseReference,
+        childPath: String,
+        isCallerCandidate: Boolean
+    ) {
+        val listener = object : ChildEventListener {
+            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                val key = snapshot.key ?: return
+                if (processedCandidateKeys.add("${childPath}_$key")) {
+                    val sdp = snapshot.child("sdp").getValue(String::class.java) ?: return
+                    val sdpMid = snapshot.child("sdpMid").getValue(String::class.java)
+                    val sdpMLineIndex = snapshot.child("sdpMLineIndex").getValue(Int::class.java) ?: 0
+                    val serverUrl = snapshot.child("serverUrl").getValue(String::class.java)
+                    val candidate = IceCandidateModel(sdp, sdpMid, sdpMLineIndex, serverUrl)
+                    scope.launch {
+                        _events.emit(SignalingEvent.IceCandidateReceived(candidate, isCallerCandidate))
+                    }
+                }
+            }
+
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+            override fun onChildRemoved(snapshot: DataSnapshot) {}
+            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
             override fun onCancelled(error: DatabaseError) {}
         }
-        statusListener = listener
-        ref.addValueEventListener(listener)
+        candidatesListener = listener
+        ref.child(childPath).addChildEventListener(listener)
     }
 
     // REST Fallback for resilient zero-config signaling
@@ -349,63 +384,69 @@ class SignalingClient(
         return DEFAULT_FALLBACK_RTDB
     }
 
-    private fun fallbackRestCreateRoom(roomId: String, offerMap: Map<String, Any>) {
+    private fun fallbackRestStartBroadcast(channelId: String, roomMap: Map<String, Any>) {
         scope.launch {
-            val json = JSONObject(mapOf("caller" to offerMap, "status" to "calling", "createdAt" to System.currentTimeMillis())).toString()
-            postRestData("rooms/$roomId", json)
-            startRestPolling(roomId)
+            val json = JSONObject(roomMap).toString()
+            postRestData("rooms/$channelId", json)
+            startRestPolling(channelId)
         }
     }
 
-    private fun fallbackRestFetchOffer(roomId: String, onOfferReceived: (String) -> Unit) {
-        scope.launch {
-            val baseUrl = getRestBaseUrl()
-            val url = "$baseUrl/rooms/$roomId/caller.json"
-            try {
-                val request = Request.Builder().url(url).get().build()
-                val response = httpClient.newCall(request).execute()
-                val body = response.body?.string()
-                if (response.isSuccessful && !body.isNullOrBlank() && body != "null") {
-                    val json = JSONObject(body)
-                    val sdp = json.optString("sdp")
-                    if (sdp.isNotBlank()) {
-                        onOfferReceived(sdp)
-                        startRestPolling(roomId)
-                        return@launch
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "fallbackRestFetchOffer error: ${e.message}")
-            }
-            _events.emit(SignalingEvent.Error("Could not find active call for Room ID $roomId"))
-        }
-    }
-
-    private fun startRestPolling(roomId: String) {
+    private fun startRestPolling(channelId: String) {
         restPollingJob?.cancel()
         restPollingJob = scope.launch {
             val baseUrl = getRestBaseUrl()
             while (isActive) {
                 delay(1200)
                 try {
-                    val url = "$baseUrl/rooms/$roomId.json"
+                    val url = "$baseUrl/rooms/$channelId.json"
                     val request = Request.Builder().url(url).get().build()
                     val response = httpClient.newCall(request).execute()
                     val body = response.body?.string()
                     if (response.isSuccessful && !body.isNullOrBlank() && body != "null") {
                         val json = JSONObject(body)
+                        val status = json.optString("status")
 
-                        // Check answer if caller
-                        if (isCaller && json.has("callee")) {
-                            val calleeObj = json.optJSONObject("callee")
-                            val sdp = calleeObj?.optString("sdp")
-                            if (!sdp.isNullOrBlank()) {
-                                _events.emit(SignalingEvent.AnswerReceived(sdp))
+                        if (isBroadcaster) {
+                            if (json.has("callee")) {
+                                val calleeObj = json.optJSONObject("callee")
+                                val sdp = calleeObj?.optString("sdp")
+                                if (!sdp.isNullOrBlank() && sdp != lastAppliedAnswerSdp) {
+                                    lastAppliedAnswerSdp = sdp
+                                    _events.emit(SignalingEvent.AnswerReceived(sdp))
+                                }
+                            }
+                            if (status == "viewer_left" && !hasNotifiedViewerLeftForSession) {
+                                hasNotifiedViewerLeftForSession = true
+                                _events.emit(SignalingEvent.ViewerLeft(System.currentTimeMillis()))
+                            }
+                        } else {
+                            if (status == "ended" && lastAppliedOfferSessionKey != null) {
+                                lastAppliedOfferSessionKey = null
+                                _events.emit(SignalingEvent.PeerDisconnected("Broadcast stopped by camera"))
+                            } else if (json.has("caller") && (status == "broadcasting" || status == "reconnecting")) {
+                                val callerObj = json.optJSONObject("caller")
+                                val offerSdp = callerObj?.optString("sdp")
+                                val sessionId = callerObj?.optString("sessionId") ?: ""
+                                val reconnectTs = callerObj?.optLong("reconnectTimestamp", 0L) ?: 0L
+                                if (!offerSdp.isNullOrBlank()) {
+                                    val offerKey = "${sessionId}_${reconnectTs}_${offerSdp.hashCode()}"
+                                    if (offerKey != lastAppliedOfferSessionKey) {
+                                        lastAppliedOfferSessionKey = offerKey
+                                        _events.emit(
+                                            SignalingEvent.OfferReceived(
+                                                sdp = offerSdp,
+                                                sessionId = sessionId,
+                                                isReconnect = reconnectTs > 0L
+                                            )
+                                        )
+                                    }
+                                }
                             }
                         }
 
                         // Check candidates
-                        val targetCandidateKey = if (isCaller) "calleeCandidates" else "callerCandidates"
+                        val targetCandidateKey = if (isBroadcaster) "calleeCandidates" else "callerCandidates"
                         if (json.has(targetCandidateKey)) {
                             val candObj = json.optJSONObject(targetCandidateKey)
                             candObj?.keys()?.forEach { key ->
@@ -418,20 +459,14 @@ class SignalingClient(
                                         val sdpMLineIndex = cJson.optInt("sdpMLineIndex", 0)
                                         val serverUrl = cJson.optString("serverUrl")
                                         val candidate = IceCandidateModel(sdp, sdpMid, sdpMLineIndex, serverUrl)
-                                        _events.emit(SignalingEvent.IceCandidateReceived(candidate, !isCaller))
+                                        _events.emit(SignalingEvent.IceCandidateReceived(candidate, !isBroadcaster))
                                     }
                                 }
                             }
                         }
-
-                        // Status
-                        val status = json.optString("status")
-                        if (status == "ended") {
-                            _events.emit(SignalingEvent.PeerDisconnected("Call ended"))
-                        }
                     }
-                } catch (e: Exception) {
-                    // Ignore network polling glitches
+                } catch (_: Exception) {
+                    // Ignore transient polling glitches
                 }
             }
         }
@@ -440,7 +475,7 @@ class SignalingClient(
     private fun postRestData(path: String, json: String, isPush: Boolean = false) {
         try {
             val baseUrl = getRestBaseUrl()
-            val url = if (isPush) "$baseUrl/$path.json" else "$baseUrl/$path.json"
+            val url = "$baseUrl/$path.json"
             val mediaType = "application/json; charset=utf-8".toMediaType()
             val requestBody = json.toRequestBody(mediaType)
             val request = if (isPush) {
@@ -454,7 +489,7 @@ class SignalingClient(
         }
     }
 
-    fun endCall() {
+    fun stopBroadcast() {
         val roomId = currentRoomId
         if (roomId != null) {
             updateStatus("ended")
@@ -462,25 +497,38 @@ class SignalingClient(
         cleanup()
     }
 
-    fun cleanup() {
+    fun leaveAsViewer() {
+        val roomId = currentRoomId
+        if (roomId != null) {
+            updateStatus("viewer_left")
+        }
+        cleanup()
+    }
+
+    private fun cleanupListenersOnly() {
         restPollingJob?.cancel()
         restPollingJob = null
 
         val ref = roomRef
         if (ref != null) {
-            offerAnswerListener?.let { ref.removeEventListener(it) }
-            statusListener?.let { ref.removeEventListener(it) }
+            roomValueListener?.let { ref.removeEventListener(it) }
             candidatesListener?.let {
                 ref.child("calleeCandidates").removeEventListener(it)
                 ref.child("callerCandidates").removeEventListener(it)
             }
         }
-
-        offerAnswerListener = null
-        statusListener = null
+        roomValueListener = null
         candidatesListener = null
+    }
+
+    fun cleanup() {
+        cleanupListenersOnly()
         roomRef = null
         currentRoomId = null
         processedCandidateKeys.clear()
+        lastAppliedAnswerSdp = null
+        lastAppliedOfferSessionKey = null
+        lastAppliedReconnectTs = 0L
+        hasNotifiedViewerLeftForSession = false
     }
 }

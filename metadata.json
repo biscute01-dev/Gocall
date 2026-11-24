@@ -1,6 +1,6 @@
 {
-  "name": "One-on-One Video Call",
-  "description": "Peer-to-peer 1-on-1 video calling with WebRTC, Firebase Realtime Database signaling, Google public STUN servers, adaptive HD remote video and AAC audio MP4 recording, live FPS/bitrate stats HUD, and auto reconnection.",
+  "name": "CamGuard",
+  "description": "Zero-login 2-mode P2P surveillance app with single-tap Broadcast (camera unit) and View (monitor unit) modes, WebRTC live streaming, HD MP4 video & audio recording, stealth blackout screen, and auto-reconnection.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

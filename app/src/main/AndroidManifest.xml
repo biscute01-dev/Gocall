@@ -9,17 +9,11 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
@@ -33,16 +27,12 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
-        <!-- Disable automatic Firebase Messaging registration retry which causes fatal log errors without Play Services / FCM setup -->
         <meta-data
             android:name="firebase_messaging_auto_init_enabled"
             android:value="false" />
         <meta-data
             android:name="firebase_analytics_collection_deactivated"
             android:value="true" />
-        <meta-data
-            android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="incoming_calls_channel" />
 
         <activity
             android:name=".MainActivity"
@@ -59,22 +49,13 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground Service for ongoing call notification -->
+        <!-- Foreground Service for ongoing Broadcast (camera/mic) or View (mediaPlayback) -->
         <service
             android:name=".service.CallForegroundService"
             android:exported="false"
-            android:foregroundServiceType="phoneCall|camera|microphone" />
+            android:foregroundServiceType="camera|microphone|mediaPlayback" />
 
-        <!-- Firebase Cloud Messaging Service -->
-        <service
-            android:name=".notification.MyFirebaseMessagingService"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.google.firebase.MESSAGING_EVENT" />
-            </intent-filter>
-        </service>
-
-        <!-- BroadcastReceiver for Notification action buttons (e.g. End Call) -->
+        <!-- BroadcastReceiver for Notification action buttons (e.g. Stop) -->
         <receiver
             android:name=".service.CallActionReceiver"
             android:exported="false" />

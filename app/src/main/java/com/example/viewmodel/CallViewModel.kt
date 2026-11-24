@@ -2,21 +2,27 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AppAudioManager
-import com.example.auth.CallInvitation
-import com.example.auth.FriendUser
-import com.example.auth.FriendsRepository
-import com.example.auth.UserProfile
-import com.example.notification.NotificationHelper
 import com.example.service.CallForegroundService
 import com.example.signaling.IceCandidateModel
 import com.example.signaling.SignalingClient
 import com.example.signaling.SignalingEvent
+import com.example.webrtc.SurveillanceRole
 import com.example.webrtc.WebRtcClient
 import com.example.webrtc.WebRtcEvent
+import com.example.webrtc.WebRtcLiveStats
+import com.example.webrtc.reconnect.DefaultReconnectPolicy
+import com.example.webrtc.reconnect.DisconnectReason
+import com.example.webrtc.reconnect.ReconnectContext
+import com.example.webrtc.reconnect.ReconnectMode
+import com.example.webrtc.reconnect.ReconnectPolicy
+import com.example.webrtc.record.RemoteCallRecorder
+import com.example.webrtc.record.RecordingStatus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,27 +34,24 @@ import org.webrtc.IceCandidate
 import org.webrtc.PeerConnection
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
-import com.example.webrtc.WebRtcLiveStats
-import com.example.webrtc.record.RemoteCallRecorder
-import com.example.webrtc.record.RecordingStatus
-import com.example.webrtc.reconnect.DefaultReconnectPolicy
-import com.example.webrtc.reconnect.DisconnectReason
-import com.example.webrtc.reconnect.ReconnectContext
-import com.example.webrtc.reconnect.ReconnectMode
-import com.example.webrtc.reconnect.ReconnectPolicy
 import java.io.File
-import android.net.Uri
-import android.content.Intent
+import java.util.Locale
+import java.util.UUID
 import kotlin.random.Random
+
+enum class SurveillanceMode {
+    NONE,
+    BROADCAST,
+    VIEW
+}
 
 sealed class CallState {
     object Idle : CallState()
-    data class CreatingCall(val roomId: String) : CallState()
-    data class WaitingForPeer(val roomId: String) : CallState()
-    data class JoiningCall(val roomId: String) : CallState()
-    data class Connected(val roomId: String, val durationSeconds: Long = 0) : CallState()
+    data class WaitingForPeer(val channelId: String) : CallState()
+    data class JoiningCall(val channelId: String) : CallState()
+    data class Connected(val channelId: String, val durationSeconds: Long = 0) : CallState()
     data class Reconnecting(
-        val roomId: String,
+        val channelId: String,
         val attempt: Int,
         val reason: String,
         val maxAttempts: Int = 30
@@ -70,9 +73,11 @@ data class CallUiStats(
 class CallViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "CallViewModel"
-        private const val PREFS_NAME = "video_call_prefs"
+        private const val PREFS_NAME = "camguard_prefs"
         private const val KEY_CUSTOM_RTDB = "custom_rtdb_url"
-        private const val KEY_RECENT_ROOMS = "recent_rooms"
+        private const val KEY_ACTIVE_CHANNEL = "active_channel_id"
+        private const val KEY_RECENT_CHANNELS = "recent_channels"
+        const val DEFAULT_CHANNEL_ID = "cam-01"
 
         @Volatile
         var activeInstance: CallViewModel? = null
@@ -89,30 +94,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     val audioManager: AppAudioManager = AppAudioManager(application)
 
-    val friendsRepository: FriendsRepository = FriendsRepository(application, prefs.getString(KEY_CUSTOM_RTDB, null))
-
-    private val _peerUid = MutableStateFlow("")
-    val peerUid: StateFlow<String> = _peerUid.asStateFlow()
-
-    private val _peerDisplayName = MutableStateFlow("")
-    val peerDisplayName: StateFlow<String> = _peerDisplayName.asStateFlow()
-
-    private val _peerUsername = MutableStateFlow("")
-    val peerUsername: StateFlow<String> = _peerUsername.asStateFlow()
-
-    private val _peerPhotoUrl = MutableStateFlow<String?>(null)
-    val peerPhotoUrl: StateFlow<String?> = _peerPhotoUrl.asStateFlow()
-
-    private val _peerAvatarBase64 = MutableStateFlow<String?>(null)
-    val peerAvatarBase64: StateFlow<String?> = _peerAvatarBase64.asStateFlow()
-
-    private val _isOutgoingRinging = MutableStateFlow(false)
-    val isOutgoingRinging: StateFlow<Boolean> = _isOutgoingRinging.asStateFlow()
-
-    private var activeCallInvitation: CallInvitation? = null
+    private val _surveillanceMode = MutableStateFlow(SurveillanceMode.NONE)
+    val surveillanceMode: StateFlow<SurveillanceMode> = _surveillanceMode.asStateFlow()
 
     private val _callState = MutableStateFlow<CallState>(CallState.Idle)
     val callState: StateFlow<CallState> = _callState.asStateFlow()
+
+    private val _activeChannelId = MutableStateFlow(
+        prefs.getString(KEY_ACTIVE_CHANNEL, DEFAULT_CHANNEL_ID)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_CHANNEL_ID
+    )
+    val activeChannelId: StateFlow<String> = _activeChannelId.asStateFlow()
 
     private val _currentRoomId = MutableStateFlow<String?>(null)
     val currentRoomId: StateFlow<String?> = _currentRoomId.asStateFlow()
@@ -138,13 +130,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _isCameraEnabled = MutableStateFlow(true)
     val isCameraEnabled: StateFlow<Boolean> = _isCameraEnabled.asStateFlow()
 
-    private val _isFrontCamera = MutableStateFlow(true)
+    private val _isFrontCamera = MutableStateFlow(false)
     val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
 
-    private val _isSpeakerOn = audioManager.isSpeakerOn
+    private val _isRemoteAudioMuted = MutableStateFlow(false)
+    val isRemoteAudioMuted: StateFlow<Boolean> = _isRemoteAudioMuted.asStateFlow()
 
-    private val _recentRooms = MutableStateFlow<List<String>>(loadRecentRooms())
-    val recentRooms: StateFlow<List<String>> = _recentRooms.asStateFlow()
+    private val _isStealthMode = MutableStateFlow(false)
+    val isStealthMode: StateFlow<Boolean> = _isStealthMode.asStateFlow()
+
+    private val _recentChannels = MutableStateFlow<List<String>>(loadRecentChannels())
+    val recentChannels: StateFlow<List<String>> = _recentChannels.asStateFlow()
 
     private val _customDatabaseUrl = MutableStateFlow(prefs.getString(KEY_CUSTOM_RTDB, ""))
     val customDatabaseUrl: StateFlow<String?> = _customDatabaseUrl.asStateFlow()
@@ -155,7 +151,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _liveStats = MutableStateFlow(WebRtcLiveStats())
     val liveStats: StateFlow<WebRtcLiveStats> = _liveStats.asStateFlow()
 
-    private val _showLiveHud = MutableStateFlow(true)
+    private val _showLiveHud = MutableStateFlow(false)
     val showLiveHud: StateFlow<Boolean> = _showLiveHud.asStateFlow()
 
     private val _recordingStatus = MutableStateFlow<RecordingStatus>(RecordingStatus.Idle)
@@ -164,19 +160,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _isInPipMode = MutableStateFlow(false)
     val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
 
-    fun setInPipMode(inPip: Boolean) {
-        _isInPipMode.value = inPip
-    }
-
     private var remoteRecorder: RemoteCallRecorder? = null
     private var durationTimerJob: Job? = null
     private var statsPollingJob: Job? = null
     private var reconnectJob: Job? = null
     private var disconnectDebounceJob: Job? = null
+    private var webRtcObserverJobs = mutableListOf<Job>()
+
     private var localCandidates = 0
     private var remoteCandidates = 0
     private var reconnectAttempts = 0
     private var hasReconnectedOnce = false
+    private var currentSessionId: String = ""
+    private var lastViewerSessionId: String = ""
     private val reconnectPolicy: ReconnectPolicy = DefaultReconnectPolicy()
 
     init {
@@ -184,46 +180,87 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         observeSignalingEvents()
     }
 
-    private fun initWebRtc() {
-        if (webRtcClient == null) {
-            val client = WebRtcClient(getApplication())
-            webRtcClient = client
-            client.startLocalMedia()
+    fun setInPipMode(inPip: Boolean) {
+        _isInPipMode.value = inPip
+    }
 
-            viewModelScope.launch {
-                client.events.collect { event ->
-                    handleWebRtcEvent(event)
-                }
-            }
-            viewModelScope.launch {
-                client.remoteVideoTrack.collect { track ->
-                    _remoteVideoTrack.value = track
-                }
-            }
-            viewModelScope.launch {
-                client.isFrontCamera.collect { isFront ->
-                    _isFrontCamera.value = isFront
-                }
-            }
-            viewModelScope.launch {
-                client.isMicEnabled.collect { mic ->
-                    _isMicEnabled.value = mic
-                }
-            }
-            viewModelScope.launch {
-                client.isCameraEnabled.collect { cam ->
-                    _isCameraEnabled.value = cam
-                }
-            }
+    fun setActiveChannelId(channelId: String) {
+        val sanitized = sanitizeChannelId(channelId)
+        _activeChannelId.value = sanitized
+        if (sanitized.isNotBlank()) {
+            prefs.edit().putString(KEY_ACTIVE_CHANNEL, sanitized).apply()
+        }
+    }
 
+    fun generateRandomChannelId(): String {
+        val code = "cam-${Random.nextInt(1000, 9999)}"
+        setActiveChannelId(code)
+        return code
+    }
+
+    fun setCustomDatabaseUrl(url: String) {
+        val cleanUrl = url.trim()
+        prefs.edit().putString(KEY_CUSTOM_RTDB, cleanUrl).apply()
+        _customDatabaseUrl.value = cleanUrl
+        signalingClient.updateCustomUrl(if (cleanUrl.isBlank()) null else cleanUrl)
+    }
+
+    private fun sanitizeChannelId(raw: String): String {
+        return raw.trim()
+            .lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9_-]"), "-")
+            .take(24)
+    }
+
+    private fun initWebRtc(role: SurveillanceRole, enableAudio: Boolean = true) {
+        cancelWebRtcObservers()
+        webRtcClient?.close()
+
+        val client = WebRtcClient(getApplication())
+        webRtcClient = client
+
+        if (role == SurveillanceRole.BROADCASTER) {
+            client.startLocalMedia(preferBackCamera = true, enableAudio = enableAudio)
+            _isMicEnabled.value = enableAudio && client.isMicEnabled.value
+            _isCameraEnabled.value = true
+        } else {
+            _isRemoteAudioMuted.value = false
+        }
+
+        webRtcObserverJobs += viewModelScope.launch {
+            client.events.collect { event -> handleWebRtcEvent(event) }
+        }
+        webRtcObserverJobs += viewModelScope.launch {
+            client.remoteVideoTrack.collect { track -> _remoteVideoTrack.value = track }
+        }
+        webRtcObserverJobs += viewModelScope.launch {
+            client.isFrontCamera.collect { isFront -> _isFrontCamera.value = isFront }
+        }
+        webRtcObserverJobs += viewModelScope.launch {
+            client.isMicEnabled.collect { mic -> _isMicEnabled.value = mic }
+        }
+        webRtcObserverJobs += viewModelScope.launch {
+            client.isCameraEnabled.collect { cam -> _isCameraEnabled.value = cam }
+        }
+        webRtcObserverJobs += viewModelScope.launch {
+            client.isRemoteAudioMuted.collect { muted -> _isRemoteAudioMuted.value = muted }
+        }
+
+        if (role == SurveillanceRole.VIEWER) {
             val rec = RemoteCallRecorder(getApplication(), client.rootEglBase.eglBaseContext)
             remoteRecorder = rec
-            viewModelScope.launch {
-                rec.recordingStatus.collect { status ->
-                    _recordingStatus.value = status
-                }
+            webRtcObserverJobs += viewModelScope.launch {
+                rec.recordingStatus.collect { status -> _recordingStatus.value = status }
             }
+        } else {
+            remoteRecorder = null
+            _recordingStatus.value = RecordingStatus.Idle
         }
+    }
+
+    private fun cancelWebRtcObservers() {
+        webRtcObserverJobs.forEach { it.cancel() }
+        webRtcObserverJobs.clear()
     }
 
     private fun observeSignalingEvents() {
@@ -234,202 +271,129 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setCustomDatabaseUrl(url: String) {
-        val cleanUrl = url.trim()
-        prefs.edit().putString(KEY_CUSTOM_RTDB, cleanUrl).apply()
-        _customDatabaseUrl.value = cleanUrl
-        signalingClient.updateCustomUrl(if (cleanUrl.isBlank()) null else cleanUrl)
-    }
+    /**
+     * Single-tap BROADCAST mode (Camera Unit).
+     * Captures rear camera + optional mic and streams one-way (sendonly) on the channel.
+     */
+    fun startBroadcast(channelId: String = _activeChannelId.value, enableAudio: Boolean = true) {
+        val cleanId = sanitizeChannelId(channelId).ifBlank { DEFAULT_CHANNEL_ID }
+        setActiveChannelId(cleanId)
+        saveRecentChannel(cleanId)
 
-    fun generateRandomRoomId(): String {
-        val prefixes = listOf("call", "room", "meet", "talk", "live")
-        val randomNum = Random.nextInt(1000, 9999)
-        return "${prefixes.random()}-$randomNum"
-    }
-
-    fun startDirectCall(friend: FriendUser, myProfile: UserProfile) {
-        val safeMyUid = myProfile.uid.replace(Regex("[^a-zA-Z0-9]"), "").take(6)
-        val safeFriendUid = friend.uid.replace(Regex("[^a-zA-Z0-9]"), "").take(6)
-        val callId = "call_${safeMyUid}_${safeFriendUid}_${System.currentTimeMillis()}"
-
-        _peerUid.value = friend.uid
-        _peerDisplayName.value = friend.displayName
-        _peerUsername.value = friend.username
-        _peerPhotoUrl.value = friend.photoUrl
-        _peerAvatarBase64.value = friend.avatarBase64
-        _isOutgoingRinging.value = true
-
-        val invitation = CallInvitation(
-            callId = callId,
-            callerUid = myProfile.uid,
-            callerDisplayName = myProfile.displayName,
-            callerUsername = myProfile.username,
-            callerPhotoUrl = myProfile.photoUrl,
-            callerAvatarBase64 = myProfile.avatarBase64,
-            calleeUid = friend.uid,
-            calleeDisplayName = friend.displayName,
-            calleeUsername = friend.username,
-            calleePhotoUrl = friend.photoUrl,
-            calleeAvatarBase64 = friend.avatarBase64,
-            status = "ringing",
-            timestamp = System.currentTimeMillis()
-        )
-        activeCallInvitation = invitation
-
-        _currentRoomId.value = callId
-        _isCaller.value = true
-        _callState.value = CallState.WaitingForPeer(callId)
-        localCandidates = 0
-        remoteCandidates = 0
-        reconnectAttempts = 0
-        _isRemoteCameraEnabled.value = true
-        _isRemoteMicEnabled.value = true
-
-        initWebRtc()
-        audioManager.start()
-        CallForegroundService.startService(getApplication(), friend.displayName, callId)
-
-        val rtc = webRtcClient ?: return
-        rtc.createPeerConnection()
-
-        rtc.createOffer(
-            onSdpCreated = { sessionDescription ->
-                Log.d(TAG, "Created Offer SDP for direct call $callId")
-                signalingClient.createRoom(callId, sessionDescription.description)
-                viewModelScope.launch {
-                    friendsRepository.sendCallInvitation(invitation)
-                }
-            }
-        )
-    }
-
-    fun acceptIncomingCall(invitation: CallInvitation) {
-        activeCallInvitation = invitation
-        _peerUid.value = invitation.callerUid
-        _peerDisplayName.value = invitation.callerDisplayName
-        _peerUsername.value = invitation.callerUsername
-        _peerPhotoUrl.value = invitation.callerPhotoUrl
-        _peerAvatarBase64.value = invitation.callerAvatarBase64
-        _isOutgoingRinging.value = false
-
-        val callId = invitation.callId
-        _currentRoomId.value = callId
-        _isCaller.value = false
-        _callState.value = CallState.JoiningCall(callId)
-        localCandidates = 0
-        remoteCandidates = 0
-        reconnectAttempts = 0
-        _isRemoteCameraEnabled.value = true
-        _isRemoteMicEnabled.value = true
-
-        initWebRtc()
-        audioManager.start()
-        CallForegroundService.startService(getApplication(), invitation.callerDisplayName, callId)
-
-        val rtc = webRtcClient ?: return
-        rtc.createPeerConnection()
-
-        signalingClient.joinRoom(callId) { offerSdp ->
-            Log.d(TAG, "Received offer SDP for direct call $callId, sending answer")
-            rtc.setRemoteDescription(offerSdp, SessionDescription.Type.OFFER) {
-                rtc.createAnswer { answerDesc ->
-                    signalingClient.sendAnswer(answerDesc.description)
-                    viewModelScope.launch {
-                        friendsRepository.clearIncomingCall(invitation.calleeUid)
-                    }
-                }
-            }
-        }
-    }
-
-    fun rejectIncomingCall(invitation: CallInvitation) {
-        viewModelScope.launch {
-            friendsRepository.rejectCall(invitation)
-        }
-        if (_currentRoomId.value == invitation.callId) {
-            endCall()
-        }
-    }
-
-    fun cancelOutgoingDirectCall() {
-        val invitation = activeCallInvitation
-        if (invitation != null) {
-            viewModelScope.launch {
-                friendsRepository.cancelOutgoingCall(invitation.callId, invitation.calleeUid)
-            }
-        }
-        endCall()
-    }
-
-    fun createRoom(roomId: String = generateRandomRoomId()) {
-        val cleanId = roomId.trim().lowercase()
+        _surveillanceMode.value = SurveillanceMode.BROADCAST
         _currentRoomId.value = cleanId
         _isCaller.value = true
-        _callState.value = CallState.CreatingCall(cleanId)
+        _isStealthMode.value = false
+        _callDurationSeconds.value = 0L
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
         hasReconnectedOnce = false
-        saveRecentRoom(cleanId)
-        _isRemoteCameraEnabled.value = true
-        _isRemoteMicEnabled.value = true
+        currentSessionId = UUID.randomUUID().toString().take(8)
 
-        initWebRtc()
-        audioManager.start()
-        CallForegroundService.startService(getApplication(), "Room $cleanId", cleanId)
+        initWebRtc(role = SurveillanceRole.BROADCASTER, enableAudio = enableAudio)
+        CallForegroundService.startService(getApplication(), isBroadcaster = true, channelId = cleanId)
 
         val rtc = webRtcClient ?: return
-        rtc.createPeerConnection()
+        rtc.createPeerConnection(SurveillanceRole.BROADCASTER)
         _callState.value = CallState.WaitingForPeer(cleanId)
+        startDurationTimer()
 
         rtc.createOffer(
+            isBroadcaster = true,
             onSdpCreated = { sessionDescription ->
-                Log.d(TAG, "Created Offer SDP for room $cleanId")
-                signalingClient.createRoom(cleanId, sessionDescription.description)
+                Log.d(TAG, "Broadcast Offer created for channel '$cleanId' (session=$currentSessionId)")
+                signalingClient.startBroadcast(cleanId, sessionDescription.description, currentSessionId)
+                signalingClient.updateMediaState(
+                    isCameraEnabled = _isCameraEnabled.value,
+                    isMicEnabled = _isMicEnabled.value
+                )
             }
         )
     }
 
-    fun joinRoom(roomId: String) {
-        val cleanId = roomId.trim().lowercase()
-        if (cleanId.isBlank()) {
-            _callState.value = CallState.Error("Room ID cannot be empty")
-            return
-        }
+    /**
+     * Single-tap VIEW mode (Monitor Unit).
+     * Receive-only (recvonly) — requires zero camera or microphone permissions!
+     * Automatically waits if the Broadcaster isn't live yet and connects the moment it starts.
+     */
+    fun startViewing(channelId: String = _activeChannelId.value) {
+        val cleanId = sanitizeChannelId(channelId).ifBlank { DEFAULT_CHANNEL_ID }
+        setActiveChannelId(cleanId)
+        saveRecentChannel(cleanId)
+
+        _surveillanceMode.value = SurveillanceMode.VIEW
         _currentRoomId.value = cleanId
         _isCaller.value = false
-        _callState.value = CallState.JoiningCall(cleanId)
+        _isStealthMode.value = false
+        _callDurationSeconds.value = 0L
+        _isRemoteCameraEnabled.value = true
+        _isRemoteMicEnabled.value = true
+        _remoteVideoTrack.value = null
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
         hasReconnectedOnce = false
-        saveRecentRoom(cleanId)
-        _isRemoteCameraEnabled.value = true
-        _isRemoteMicEnabled.value = true
+        lastViewerSessionId = ""
 
-        initWebRtc()
+        initWebRtc(role = SurveillanceRole.VIEWER, enableAudio = false)
         audioManager.start()
-        CallForegroundService.startService(getApplication(), "Room $cleanId", cleanId)
+        CallForegroundService.startService(getApplication(), isBroadcaster = false, channelId = cleanId)
 
         val rtc = webRtcClient ?: return
-        rtc.createPeerConnection()
+        rtc.createPeerConnection(SurveillanceRole.VIEWER)
+        _callState.value = CallState.JoiningCall(cleanId)
 
-        signalingClient.joinRoom(cleanId) { offerSdp ->
-            Log.d(TAG, "Received offer SDP, setting remote desc & creating answer")
-            rtc.setRemoteDescription(offerSdp, SessionDescription.Type.OFFER) {
-                rtc.createAnswer { answerDesc ->
-                    Log.d(TAG, "Created Answer SDP, sending to Firebase RTDB")
-                    signalingClient.sendAnswer(answerDesc.description)
-                }
-            }
+        signalingClient.joinAsViewer(cleanId)
+    }
+
+    /**
+     * When a viewer disconnects cleanly, keep the Broadcaster camera running uninterrupted
+     * and publish a fresh SDP Offer so the next viewer can connect immediately with 1 tap.
+     */
+    private fun resetBroadcasterForNextViewer() {
+        val channelId = _currentRoomId.value ?: return
+        val rtc = webRtcClient ?: return
+        if (_surveillanceMode.value != SurveillanceMode.BROADCAST) return
+
+        Log.d(TAG, "Viewer left channel '$channelId'. Refreshing broadcast offer for next viewer...")
+        reconnectJob?.cancel()
+        disconnectDebounceJob?.cancel()
+        stopStatsPolling()
+
+        localCandidates = 0
+        remoteCandidates = 0
+        reconnectAttempts = 0
+        hasReconnectedOnce = false
+        currentSessionId = UUID.randomUUID().toString().take(8)
+        _callState.value = CallState.WaitingForPeer(channelId)
+
+        rtc.rebuildPeerConnection(SurveillanceRole.BROADCASTER) { sdpOffer ->
+            signalingClient.startBroadcast(channelId, sdpOffer.description, currentSessionId)
+            signalingClient.updateMediaState(
+                isCameraEnabled = _isCameraEnabled.value,
+                isMicEnabled = _isMicEnabled.value
+            )
         }
     }
 
     private fun handleSignalingEvent(event: SignalingEvent) {
         when (event) {
             is SignalingEvent.OfferReceived -> {
-                if (!_isCaller.value) {
+                if (_surveillanceMode.value == SurveillanceMode.VIEW) {
                     val rtc = webRtcClient ?: return
+                    val isNewBroadcastSession = lastViewerSessionId.isNotBlank() &&
+                        event.sessionId.isNotBlank() &&
+                        event.sessionId != lastViewerSessionId
+
+                    if (isNewBroadcastSession) {
+                        Log.d(TAG, "New broadcaster session detected (${event.sessionId}); rebuilding viewer PeerConnection")
+                        localCandidates = 0
+                        remoteCandidates = 0
+                        rtc.rebuildPeerConnection(SurveillanceRole.VIEWER)
+                    }
+                    lastViewerSessionId = event.sessionId
+
                     rtc.setRemoteDescription(event.sdp, SessionDescription.Type.OFFER) {
                         rtc.createAnswer { answerDesc ->
                             signalingClient.sendAnswer(answerDesc.description)
@@ -438,10 +402,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             is SignalingEvent.AnswerReceived -> {
-                if (_isCaller.value) {
+                if (_surveillanceMode.value == SurveillanceMode.BROADCAST) {
                     val rtc = webRtcClient ?: return
                     rtc.setRemoteDescription(event.sdp, SessionDescription.Type.ANSWER) {
-                        Log.d(TAG, "Answer applied successfully on caller")
+                        Log.d(TAG, "Viewer Answer applied successfully on Broadcaster")
                     }
                 }
             }
@@ -455,31 +419,49 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 updateStats()
                 webRtcClient?.addIceCandidate(candidate)
             }
+            is SignalingEvent.ViewerLeft -> {
+                if (_surveillanceMode.value == SurveillanceMode.BROADCAST) {
+                    resetBroadcasterForNextViewer()
+                }
+            }
             is SignalingEvent.PeerDisconnected -> {
-                _callState.value = CallState.Ended(event.reason)
-                stopDurationTimer()
+                if (_surveillanceMode.value == SurveillanceMode.VIEW) {
+                    // Broadcaster stopped: finalize any active recording safely, then wait for broadcaster to resume
+                    if (remoteRecorder?.isRecording == true) {
+                        remoteRecorder?.stopRecording()
+                    }
+                    _remoteVideoTrack.value = null
+                    stopDurationTimer()
+                    stopStatsPolling()
+                    reconnectJob?.cancel()
+                    val channelId = _currentRoomId.value
+                    if (channelId != null) {
+                        _callState.value = CallState.JoiningCall(channelId)
+                        webRtcClient?.rebuildPeerConnection(SurveillanceRole.VIEWER)
+                    } else {
+                        _callState.value = CallState.Ended(event.reason)
+                    }
+                }
             }
             is SignalingEvent.PeerMediaStateChanged -> {
                 _isRemoteCameraEnabled.value = event.isCameraEnabled
                 _isRemoteMicEnabled.value = event.isMicEnabled
             }
             is SignalingEvent.ReconnectRequested -> {
-                Log.d(TAG, "Peer requested reconnection (strategy renegotiation)...")
-                val roomId = _currentRoomId.value ?: return
-                if (!_isCaller.value) {
+                val channelId = _currentRoomId.value ?: return
+                if (_surveillanceMode.value == SurveillanceMode.VIEW) {
                     reconnectAttempts++
                     val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
                     updateStats()
-                    // If mode is FULL_RECONNECT, flip state to Reconnecting (guarded by hasReconnectedOnce).
-                    // Resume is silent to the UI.
+                    // Resume stays silent to the UI; Full Reconnect fires once via hasReconnectedOnce gate
                     if (mode == ReconnectMode.FULL_RECONNECT) {
                         _remoteVideoTrack.value = null
                         if (!hasReconnectedOnce) {
                             hasReconnectedOnce = true
                             _callState.value = CallState.Reconnecting(
-                                roomId = roomId,
+                                channelId = channelId,
                                 attempt = reconnectAttempts,
-                                reason = "Caller initiated full reconnect",
+                                reason = "Camera initiated full reconnect",
                                 maxAttempts = 30
                             )
                         }
@@ -511,18 +493,17 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
                         disconnectDebounceJob?.cancel()
-                        val roomId = _currentRoomId.value ?: ""
+                        val channelId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
                         reconnectAttempts = 0
                         hasReconnectedOnce = false
                         if (_callState.value !is CallState.Connected) {
-                            _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
+                            _callState.value = CallState.Connected(channelId, _callDurationSeconds.value)
                         }
                         startDurationTimer()
                         startStatsPolling()
                     }
                     PeerConnection.IceConnectionState.DISCONNECTED -> {
-                        // Debounce transient ICE disconnects (4 seconds) before displaying reconnecting state
                         disconnectDebounceJob?.cancel()
                         disconnectDebounceJob = viewModelScope.launch {
                             delay(4000)
@@ -537,7 +518,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     PeerConnection.IceConnectionState.CLOSED -> {
                         disconnectDebounceJob?.cancel()
-                        stopDurationTimer()
+                        if (_surveillanceMode.value == SurveillanceMode.VIEW) {
+                            stopDurationTimer()
+                        }
                     }
                     else -> {}
                 }
@@ -547,14 +530,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 when (event.state) {
                     PeerConnection.PeerConnectionState.CONNECTED -> {
                         disconnectDebounceJob?.cancel()
-                        val roomId = _currentRoomId.value ?: ""
+                        val channelId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
                         reconnectAttempts = 0
                         hasReconnectedOnce = false
                         if (_callState.value !is CallState.Connected) {
-                            _callState.value = CallState.Connected(roomId, _callDurationSeconds.value)
+                            _callState.value = CallState.Connected(channelId, _callDurationSeconds.value)
                         }
                         startDurationTimer()
+                        startStatsPolling()
                     }
                     PeerConnection.PeerConnectionState.DISCONNECTED -> {
                         disconnectDebounceJob?.cancel()
@@ -582,20 +566,24 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerReconnection(reason: String) {
-        val roomId = _currentRoomId.value ?: return
+        val channelId = _currentRoomId.value ?: return
+        val role = if (_surveillanceMode.value == SurveillanceMode.BROADCAST) {
+            SurveillanceRole.BROADCASTER
+        } else {
+            SurveillanceRole.VIEWER
+        }
+
         reconnectAttempts++
         val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
         updateStats()
 
-        // Room.state flips to RECONNECTING only when resume has failed and engine escalates to full reconnect.
-        // Fast resume is silent to the UI (participants, tracks, and room state remain intact).
-        // hasReconnectedOnce gate ensures Reconnecting state fires once for the whole full-reconnect retry sequence.
+        // Fast resume is silent to the UI; Full Reconnect escalates once via hasReconnectedOnce gate.
         if (mode == ReconnectMode.FULL_RECONNECT) {
-            _remoteVideoTrack.value = null // In full reconnect, remote participants/tracks disconnect
+            _remoteVideoTrack.value = null
             if (!hasReconnectedOnce) {
                 hasReconnectedOnce = true
                 _callState.value = CallState.Reconnecting(
-                    roomId = roomId,
+                    channelId = channelId,
                     attempt = reconnectAttempts,
                     reason = reason,
                     maxAttempts = 30
@@ -619,62 +607,65 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             )
             val delayDuration = reconnectPolicy.getNextRetryDelay(context)
             if (delayDuration == null) {
-                Log.w(TAG, "ReconnectPolicy hard cap reached (max 30 attempts). Reconnection aborted.")
-                _callState.value = CallState.Error("Connection lost after 30 reconnection attempts. Please rejoin.")
+                if (role == SurveillanceRole.BROADCASTER) {
+                    // Broadcaster never dies on viewer drop; reset cleanly for next viewer
+                    resetBroadcasterForNextViewer()
+                } else {
+                    _callState.value = CallState.Error("Connection lost after 30 attempts. Tap View to reconnect.")
+                }
                 return@launch
             }
 
-            Log.d(TAG, "Executing $mode reconnect attempt #$reconnectAttempts (Backoff: ${delayDuration.inWholeMilliseconds}ms, Reason: $reason)")
             delay(delayDuration.inWholeMilliseconds)
-
             if (!isActive) return@launch
-            // If we escalated to FULL_RECONNECT, ensure we haven't transitioned to Ended or Error
             if (mode == ReconnectMode.FULL_RECONNECT && _callState.value !is CallState.Reconnecting) return@launch
 
             when (mode) {
                 ReconnectMode.RESUME -> {
-                    // Fast path: Silent to UI. Keep media tracks, audio session, and participants untouched. Restart ICE.
-                    Log.d(TAG, "Triggering Fast Resume (ICE restart, silent to UI)")
-                    if (_isCaller.value) {
-                        webRtcClient?.restartIce { sdpOffer ->
-                            Log.d(TAG, "Generated Fast Resume ICE Restart Offer SDP")
-                            signalingClient.sendReconnectOffer(sdpOffer.description)
+                    Log.d(TAG, "Triggering Fast Resume (silent ICE restart)")
+                    if (role == SurveillanceRole.BROADCASTER) {
+                        webRtcClient?.restartIce(isBroadcaster = true) { sdpOffer ->
+                            signalingClient.sendReconnectOffer(sdpOffer.description, currentSessionId)
                         }
                     } else {
                         signalingClient.updateStatus("reconnecting")
                     }
                 }
                 ReconnectMode.FULL_RECONNECT -> {
-                    // Fallback path: Tear down PeerConnection, rebuild from scratch, republish tracks
-                    Log.d(TAG, "Triggering Full Reconnect (rebuilding PeerConnection & republishing tracks)")
+                    Log.d(TAG, "Triggering Full Reconnect (rebuilding PeerConnection)")
                     localCandidates = 0
                     remoteCandidates = 0
-                    webRtcClient?.rebuildPeerConnection(isCaller = _isCaller.value) { sdpOffer ->
-                        Log.d(TAG, "Generated Full Reconnect Offer SDP")
-                        signalingClient.sendReconnectOffer(sdpOffer.description)
+                    webRtcClient?.rebuildPeerConnection(role = role) { sdpOffer ->
+                        signalingClient.sendReconnectOffer(sdpOffer.description, currentSessionId)
                     }
-                    if (!_isCaller.value) {
+                    if (role == SurveillanceRole.VIEWER) {
                         signalingClient.updateStatus("reconnecting")
                     }
                 }
             }
 
-            // Fallback watchdog retry if still not connected after 8 seconds
             delay(8000)
             if (isActive && (_callState.value is CallState.Reconnecting || (_callState.value is CallState.Connected && mode == ReconnectMode.RESUME))) {
-                // If still not stable connected
                 if (reconnectAttempts < 30) {
                     val nextMode = if (reconnectAttempts + 1 <= 3) "Resume" else "Full Reconnect"
                     triggerReconnection("$nextMode retry #${reconnectAttempts + 1}")
+                } else if (role == SurveillanceRole.BROADCASTER) {
+                    resetBroadcasterForNextViewer()
                 } else {
-                    _callState.value = CallState.Error("Connection lost after 30 reconnection attempts. Please rejoin.")
+                    _callState.value = CallState.Error("Connection lost after 30 attempts. Tap View to reconnect.")
                 }
             }
         }
     }
 
-    fun forceIceRestart() {
-        triggerReconnection("Manual Reconnect")
+    fun forceReconnect() {
+        val channelId = _currentRoomId.value ?: return
+        if (_surveillanceMode.value == SurveillanceMode.VIEW && _callState.value is CallState.JoiningCall) {
+            // Re-subscribe viewer cleanly if still waiting
+            signalingClient.joinAsViewer(channelId)
+        } else {
+            triggerReconnection("Manual Reconnect")
+        }
     }
 
     private fun startDurationTimer() {
@@ -686,10 +677,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 val totalSec = _callDurationSeconds.value
                 val min = totalSec / 60
                 val sec = totalSec % 60
-                val durationText = String.format("%02d:%02d", min, sec)
-                val pName = _peerDisplayName.value
-                val rId = _currentRoomId.value ?: ""
-                CallForegroundService.updateService(getApplication(), pName, rId, durationText)
+                val durationText = String.format(Locale.US, "%02d:%02d", min, sec)
+                val channelId = _currentRoomId.value ?: ""
+                val isBroadcaster = _surveillanceMode.value == SurveillanceMode.BROADCAST
+                CallForegroundService.updateService(getApplication(), isBroadcaster, channelId, durationText)
             }
         }
     }
@@ -718,18 +709,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _showLiveHud.value = !_showLiveHud.value
     }
 
-    fun setLiveHud(visible: Boolean) {
-        _showLiveHud.value = visible
-    }
-
     fun fetchStatsNow() {
         val rtc = webRtcClient ?: return
-        val currentStrategy = if (reconnectAttempts == 0) {
-            "NONE"
-        } else if (reconnectAttempts <= 3) {
-            "RESUME"
-        } else {
-            "FULL_RECONNECT"
+        val currentStrategy = when {
+            reconnectAttempts == 0 -> "NONE"
+            reconnectAttempts <= 3 -> "RESUME"
+            else -> "FULL_RECONNECT"
         }
         rtc.fetchLiveStats { newStats ->
             _liveStats.value = newStats.copy(
@@ -753,12 +738,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateStats() {
         val rtc = webRtcClient
-        val currentStrategy = if (reconnectAttempts == 0) {
-            "NONE"
-        } else if (reconnectAttempts <= 3) {
-            "RESUME"
-        } else {
-            "FULL_RECONNECT"
+        val currentStrategy = when {
+            reconnectAttempts == 0 -> "NONE"
+            reconnectAttempts <= 3 -> "RESUME"
+            else -> "FULL_RECONNECT"
         }
         _stats.value = CallUiStats(
             iceConnectionState = rtc?.iceConnectionState?.value?.name ?: "UNKNOWN",
@@ -771,6 +754,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    // Broadcaster Controls
     fun toggleMicrophone() {
         webRtcClient?.let {
             val enabled = it.toggleMicrophone()
@@ -799,13 +783,21 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun toggleStealthMode(enabled: Boolean? = null) {
+        _isStealthMode.value = enabled ?: !_isStealthMode.value
+    }
+
+    // Viewer Controls
+    fun toggleRemoteAudio() {
+        webRtcClient?.let {
+            _isRemoteAudioMuted.value = it.toggleRemoteAudio()
+        }
+    }
+
     fun toggleSpeaker() {
         audioManager.toggleSpeaker()
     }
 
-    /**
-     * Toggles recording of the remote peer's video track and audio stream.
-     */
     fun toggleRemoteRecording(): Boolean {
         val rec = remoteRecorder ?: return false
         return if (rec.isRecording) {
@@ -813,16 +805,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             true
         } else {
             val track = _remoteVideoTrack.value
-            val room = _currentRoomId.value
-            rec.startRecording(track, room, webRtcClient)
+            val channel = _currentRoomId.value
+            rec.startRecording(track, channel, webRtcClient)
         }
-    }
-
-    fun startRemoteRecording(): Boolean {
-        val rec = remoteRecorder ?: return false
-        val track = _remoteVideoTrack.value
-        val room = _currentRoomId.value
-        return rec.startRecording(track, room, webRtcClient)
     }
 
     fun stopRemoteRecording() {
@@ -841,66 +826,68 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         return remoteRecorder?.createViewIntent(file, mediaUri)
     }
 
-    fun endCall() {
-        // Stop active foreground notification
+    fun stopSession() {
         CallForegroundService.stopService(getApplication())
-        NotificationHelper.cancelIncomingCallNotification(getApplication())
 
-        // Automatically finalize and save any active recording before closing WebRTC
+        // Always finalize any active recording before tearing down WebRTC
         if (remoteRecorder?.isRecording == true) {
             remoteRecorder?.stopRecording()
         }
 
-        signalingClient.endCall()
+        when (_surveillanceMode.value) {
+            SurveillanceMode.BROADCAST -> signalingClient.stopBroadcast()
+            SurveillanceMode.VIEW -> signalingClient.leaveAsViewer()
+            SurveillanceMode.NONE -> signalingClient.cleanup()
+        }
+
         stopDurationTimer()
         stopStatsPolling()
         reconnectJob?.cancel()
+        disconnectDebounceJob?.cancel()
+        cancelWebRtcObservers()
 
         webRtcClient?.close()
         webRtcClient = null
 
-        audioManager.stop()
-        hasReconnectedOnce = false
+        if (_surveillanceMode.value == SurveillanceMode.VIEW) {
+            audioManager.stop()
+        }
 
-        _callState.value = CallState.Ended("Call ended")
-        _callDurationSeconds.value = 0
+        hasReconnectedOnce = false
+        _isStealthMode.value = false
+        _surveillanceMode.value = SurveillanceMode.NONE
+        _callState.value = CallState.Idle
+        _currentRoomId.value = null
+        _callDurationSeconds.value = 0L
         _remoteVideoTrack.value = null
         _liveStats.value = WebRtcLiveStats()
-        _isOutgoingRinging.value = false
-        activeCallInvitation = null
+    }
+
+    fun endCall() {
+        stopSession()
     }
 
     fun resetToIdle() {
         _callState.value = CallState.Idle
+        _surveillanceMode.value = SurveillanceMode.NONE
         _currentRoomId.value = null
-        _callDurationSeconds.value = 0
+        _callDurationSeconds.value = 0L
         _remoteVideoTrack.value = null
-        _isOutgoingRinging.value = false
-        _peerUid.value = ""
-        _peerDisplayName.value = ""
-        _peerUsername.value = ""
-        _peerPhotoUrl.value = null
-        _peerAvatarBase64.value = null
-        activeCallInvitation = null
+        _isStealthMode.value = false
     }
 
-    private fun loadRecentRooms(): List<String> {
-        val raw = prefs.getString(KEY_RECENT_ROOMS, "") ?: ""
-        return if (raw.isBlank()) emptyList() else raw.split(",").filter { it.isNotBlank() }
+    private fun loadRecentChannels(): List<String> {
+        val raw = prefs.getString(KEY_RECENT_CHANNELS, "") ?: ""
+        return if (raw.isBlank()) listOf(DEFAULT_CHANNEL_ID) else raw.split(",").filter { it.isNotBlank() }
     }
 
-    private fun saveRecentRoom(roomId: String) {
-        val current = loadRecentRooms().toMutableList()
-        current.remove(roomId)
-        current.add(0, roomId)
+    private fun saveRecentChannel(channelId: String) {
+        val current = loadRecentChannels().toMutableList()
+        current.remove(channelId)
+        current.add(0, channelId)
         val trimmed = current.take(5)
-        prefs.edit().putString(KEY_RECENT_ROOMS, trimmed.joinToString(",")).apply()
-        _recentRooms.value = trimmed
-    }
-
-    fun clearRecentRooms() {
-        prefs.edit().remove(KEY_RECENT_ROOMS).apply()
-        _recentRooms.value = emptyList()
+        prefs.edit().putString(KEY_RECENT_CHANNELS, trimmed.joinToString(",")).apply()
+        _recentChannels.value = trimmed
     }
 
     override fun onCleared() {
@@ -908,6 +895,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         if (activeInstance == this) {
             activeInstance = null
         }
-        endCall()
+        stopSession()
     }
 }
