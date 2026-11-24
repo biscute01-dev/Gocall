@@ -16,7 +16,8 @@ import org.webrtc.VideoTrack
 @Composable
 fun LocalVideoView(
     webRtcClient: WebRtcClient,
-    isMirror: Boolean = true,
+    videoTrack: VideoTrack?,
+    isMirror: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -33,16 +34,40 @@ fun LocalVideoView(
     }
 
     DisposableEffect(webRtcClient) {
-        webRtcClient.initLocalSurfaceView(renderer)
-        renderer.setMirror(isMirror)
-        renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-        renderer.setFpsReduction(Float.POSITIVE_INFINITY)
+        try {
+            renderer.init(webRtcClient.rootEglBase.eglBaseContext, null)
+            renderer.setEnableHardwareScaler(true)
+            renderer.setMirror(isMirror)
+            renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            renderer.setFpsReduction(Float.POSITIVE_INFINITY)
+        } catch (_: Exception) {
+            // Already initialized or context issue
+        }
 
         onDispose {
             try {
                 renderer.release()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Ignore release errors on dispose
+            }
+        }
+    }
+
+    DisposableEffect(videoTrack) {
+        if (videoTrack != null) {
+            try {
+                videoTrack.addSink(renderer)
+            } catch (_: Exception) {
+                // Ignore attach errors
+            }
+        }
+        onDispose {
+            if (videoTrack != null) {
+                try {
+                    videoTrack.removeSink(renderer)
+                } catch (_: Exception) {
+                    // Ignore detach errors
+                }
             }
         }
     }
@@ -83,14 +108,14 @@ fun RemoteVideoView(
             renderer.setMirror(false)
             renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
             renderer.setFpsReduction(Float.POSITIVE_INFINITY)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Already initialized or context issue
         }
 
         onDispose {
             try {
                 renderer.release()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Ignore release errors
             }
         }
@@ -104,7 +129,7 @@ fun RemoteVideoView(
             if (videoTrack != null) {
                 try {
                     videoTrack.removeSink(renderer)
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     // Ignore remove sink errors
                 }
             }

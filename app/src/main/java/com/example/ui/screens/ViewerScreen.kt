@@ -31,12 +31,16 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Hearing
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sensors
@@ -68,11 +72,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.components.CallActionButton
@@ -112,16 +118,21 @@ fun ViewerScreen(
     val durationSeconds by viewModel.callDurationSeconds.collectAsState()
     val remoteVideoTrack by viewModel.remoteVideoTrack.collectAsState()
     val isRemoteCameraEnabled by viewModel.isRemoteCameraEnabled.collectAsState()
+    val isRemoteMicEnabled by viewModel.isRemoteMicEnabled.collectAsState()
+    val isRemoteFrontCamera by viewModel.isRemoteFrontCamera.collectAsState()
     val isRemoteAudioMuted by viewModel.isRemoteAudioMuted.collectAsState()
     val isSpeakerOn by viewModel.audioManager.isSpeakerOn.collectAsState()
     val recordingStatus by viewModel.recordingStatus.collectAsState()
     val showLiveHud by viewModel.showLiveHud.collectAsState()
     val liveStats by viewModel.liveStats.collectAsState()
     val isInPipMode by viewModel.isInPipMode.collectAsState()
+    val remoteCommandBanner by viewModel.remoteCommandBanner.collectAsState()
 
     val webRtcClient = viewModel.webRtcClient
     val isRecording = recordingStatus is RecordingStatus.Recording
     val isProcessingRecording = recordingStatus is RecordingStatus.Processing
+    val isCameraInStandby = callState is CallState.Standby
+    val isFeedLive = callState is CallState.Connected && remoteVideoTrack != null
 
     Box(
         modifier = Modifier
@@ -129,7 +140,7 @@ fun ViewerScreen(
             .background(SlateDark950)
     ) {
         // 1. Full-Bleed Live Surveillance Video Feed
-        if (webRtcClient != null && remoteVideoTrack != null && isRemoteCameraEnabled) {
+        if (webRtcClient != null && remoteVideoTrack != null && isRemoteCameraEnabled && !isCameraInStandby) {
             RemoteVideoView(
                 webRtcClient = webRtcClient,
                 videoTrack = remoteVideoTrack,
@@ -147,6 +158,12 @@ fun ViewerScreen(
                 contentAlignment = Alignment.Center
             ) {
                 when {
+                    isCameraInStandby -> {
+                        CameraStandbyOverlay(
+                            channelId = channelId ?: CallViewModel.DEFAULT_CHANNEL_ID,
+                            onStartBroadcastRemotely = { viewModel.remoteStartBroadcast() }
+                        )
+                    }
                     callState is CallState.Reconnecting -> {
                         ViewerReconnectingOverlay(
                             state = callState as CallState.Reconnecting,
@@ -198,7 +215,7 @@ fun ViewerScreen(
         }
 
         if (!isInPipMode) {
-            // Subtle top & bottom gradient scrims
+            // Top & bottom gradient scrims
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -212,11 +229,11 @@ fun ViewerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(170.dp)
+                    .height(230.dp)
                     .align(Alignment.BottomCenter)
                     .background(
                         Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))
+                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))
                         )
                     )
             )
@@ -288,12 +305,10 @@ fun ViewerScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         val (label, color, pulse) = when {
-                            callState is CallState.Connected && remoteVideoTrack != null ->
-                                Triple("LIVE", EmeraldGlow, true)
-                            callState is CallState.Reconnecting ->
-                                Triple("RECONNECTING", RoseDestructive, true)
-                            else ->
-                                Triple("WAITING", CyanGlow, true)
+                            isFeedLive -> Triple("LIVE", EmeraldGlow, true)
+                            isCameraInStandby -> Triple("CAM STANDBY", AmberWarning, false)
+                            callState is CallState.Reconnecting -> Triple("RECONNECTING", RoseDestructive, true)
+                            else -> Triple("WAITING", CyanGlow, true)
                         }
                         StatusPill(text = label, stateColor = color, isPulsing = pulse)
 
@@ -370,9 +385,45 @@ fun ViewerScreen(
                 }
             }
 
+            // 3b. Remote Command Feedback Pill
+            AnimatedVisibility(
+                visible = remoteCommandBanner != null,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 86.dp, start = 20.dp, end = 20.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = SlateDark900.copy(alpha = 0.94f),
+                    border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.55f))
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = null,
+                            tint = CyanGlow,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = remoteCommandBanner ?: "",
+                            color = SlateTextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
             // 4. Optional Inbound Live Stats HUD
             AnimatedVisibility(
-                visible = showLiveHud,
+                visible = showLiveHud && !isCameraInStandby,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier
@@ -383,79 +434,90 @@ fun ViewerScreen(
                 ViewerStatsCard(stats = liveStats)
             }
 
-            // 5. Recording Saved / Error Banner above bottom dock
-            when (val recState = recordingStatus) {
-                is RecordingStatus.Saved -> {
-                    RecordingSavedCard(
-                        saved = recState,
-                        onPlay = {
-                            val intent = viewModel.createViewRecordingIntent(recState.file, recState.mediaStoreUri)
-                            if (intent != null) {
-                                try {
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "No video player found", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        onShare = {
-                            val intent = viewModel.createShareRecordingIntent(recState.file, recState.mediaStoreUri)
-                            if (intent != null) {
-                                try {
-                                    context.startActivity(android.content.Intent.createChooser(intent, "Share Surveillance Recording"))
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Unable to share video", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        onDismiss = { viewModel.dismissRecordingStatus() },
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .navigationBarsPadding()
-                            .padding(bottom = 108.dp, start = 16.dp, end = 16.dp)
-                    )
-                }
-                is RecordingStatus.Error -> {
-                    Card(
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = RoseDestructive.copy(alpha = 0.92f)),
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .navigationBarsPadding()
-                            .padding(bottom = 108.dp, start = 16.dp, end = 16.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Text(
-                                text = recState.message,
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(
-                                onClick = { viewModel.dismissRecordingStatus() },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-                }
-                else -> {}
-            }
-
-            // 6. Bottom Floating Monitor Dock (Record, Mute Audio, Speaker, Refresh, Stop)
-            Box(
+            // 5. Bottom Control Stack: Saved Recording Card + Remote Camera Controls + Local Monitor Dock
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 20.dp),
-                contentAlignment = Alignment.Center
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
             ) {
+                // 5a. Recording Saved / Error Banner
+                when (val recState = recordingStatus) {
+                    is RecordingStatus.Saved -> {
+                        RecordingSavedCard(
+                            saved = recState,
+                            onPlay = {
+                                val intent = viewModel.createViewRecordingIntent(recState.file, recState.mediaStoreUri)
+                                if (intent != null) {
+                                    try {
+                                        context.startActivity(intent)
+                                    } catch (_: Exception) {
+                                        Toast.makeText(context, "No video player found", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onShare = {
+                                val intent = viewModel.createShareRecordingIntent(recState.file, recState.mediaStoreUri)
+                                if (intent != null) {
+                                    try {
+                                        context.startActivity(android.content.Intent.createChooser(intent, "Share Surveillance Recording"))
+                                    } catch (_: Exception) {
+                                        Toast.makeText(context, "Unable to share video", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                            onDismiss = { viewModel.dismissRecordingStatus() }
+                        )
+                    }
+                    is RecordingStatus.Error -> {
+                        Card(
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = RoseDestructive.copy(alpha = 0.92f)),
+                            modifier = Modifier.widthIn(max = 460.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = recState.message,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = { viewModel.dismissRecordingStatus() },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    }
+                    else -> {}
+                }
+
+                // 5b. Remote Camera Control Bar (Full remote control of the Broadcast unit)
+                RemoteCameraControlBar(
+                    isCameraInStandby = isCameraInStandby,
+                    isRemoteFrontCamera = isRemoteFrontCamera,
+                    isRemoteMicEnabled = isRemoteMicEnabled,
+                    onSwitchCamera = { viewModel.remoteSwitchCamera() },
+                    onToggleBroadcasterMic = { viewModel.remoteToggleBroadcasterMic() },
+                    onStartOrEndBroadcast = {
+                        if (isCameraInStandby) {
+                            viewModel.remoteStartBroadcast()
+                        } else {
+                            viewModel.remoteStopBroadcast()
+                        }
+                    }
+                )
+
+                // 5c. Bottom Local Monitor Dock (Record, Local Mute, Speaker, Refresh, Exit View)
                 Surface(
                     shape = RoundedCornerShape(28.dp),
                     color = GlassDarkControls,
@@ -465,20 +527,19 @@ fun ViewerScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Record Button (prominent surveillance recording control)
                         RecordActionButton(
                             isRecording = isRecording,
                             isProcessing = isProcessingRecording,
-                            isEnabled = remoteVideoTrack != null && !isProcessingRecording,
+                            isEnabled = remoteVideoTrack != null && !isProcessingRecording && !isCameraInStandby,
                             onClick = {
-                                if (remoteVideoTrack == null) {
+                                if (remoteVideoTrack == null || isCameraInStandby) {
                                     Toast.makeText(
                                         context,
-                                        "Wait for live video stream to start recording",
+                                        "Start broadcast to record live video",
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 } else {
@@ -489,10 +550,10 @@ fun ViewerScreen(
 
                         CallActionButton(
                             icon = if (isRemoteAudioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                            contentDescription = if (isRemoteAudioMuted) "Unmute Feed Audio" else "Mute Feed Audio",
+                            contentDescription = if (isRemoteAudioMuted) "Unmute Local Playback" else "Mute Local Playback",
                             onClick = { viewModel.toggleRemoteAudio() },
                             isActive = !isRemoteAudioMuted,
-                            size = 52.dp,
+                            size = 50.dp,
                             testTag = "viewer_mute_audio_button"
                         )
 
@@ -501,7 +562,7 @@ fun ViewerScreen(
                             contentDescription = if (isSpeakerOn) "Switch to Earpiece" else "Switch to Speaker",
                             onClick = { viewModel.toggleSpeaker() },
                             isActive = isSpeakerOn,
-                            size = 52.dp,
+                            size = 50.dp,
                             testTag = "viewer_speaker_button"
                         )
 
@@ -510,20 +571,225 @@ fun ViewerScreen(
                             contentDescription = "Reconnect Feed",
                             onClick = { viewModel.forceReconnect() },
                             isActive = true,
-                            size = 52.dp,
+                            size = 50.dp,
                             testTag = "viewer_reconnect_button"
                         )
 
                         CallActionButton(
                             icon = Icons.Default.Close,
-                            contentDescription = "Stop Viewing",
+                            contentDescription = "Exit View Mode",
                             onClick = onStopViewing,
                             isDestructive = true,
-                            size = 56.dp,
+                            size = 54.dp,
                             testTag = "viewer_stop_button"
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteCameraControlBar(
+    isCameraInStandby: Boolean,
+    isRemoteFrontCamera: Boolean,
+    isRemoteMicEnabled: Boolean,
+    onSwitchCamera: () -> Unit,
+    onToggleBroadcasterMic: () -> Unit,
+    onStartOrEndBroadcast: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = SlateDark900.copy(alpha = 0.90f),
+        border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.30f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 460.dp)
+            .testTag("remote_camera_control_bar")
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(horizontal = 4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Sensors,
+                    contentDescription = null,
+                    tint = CyanGlow,
+                    modifier = Modifier.size(13.dp)
+                )
+                Text(
+                    text = "REMOTE CAMERA CONTROL",
+                    color = CyanGlow,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                RemoteControlChip(
+                    icon = Icons.Default.Cameraswitch,
+                    label = if (isRemoteFrontCamera) "Front Cam" else "Rear Cam",
+                    accentColor = CyanGlow,
+                    containerColor = SlateDark800.copy(alpha = 0.92f),
+                    testTag = "remote_switch_camera_button",
+                    onClick = onSwitchCamera,
+                    modifier = Modifier.weight(1f)
+                )
+
+                RemoteControlChip(
+                    icon = if (isRemoteMicEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                    label = if (isRemoteMicEnabled) "Cam Mic On" else "Cam Muted",
+                    accentColor = if (isRemoteMicEnabled) EmeraldGlow else AmberWarning,
+                    containerColor = if (isRemoteMicEnabled) SlateDark800.copy(alpha = 0.92f) else AmberWarning.copy(alpha = 0.16f),
+                    testTag = "remote_mute_mic_button",
+                    onClick = onToggleBroadcasterMic,
+                    modifier = Modifier.weight(1f)
+                )
+
+                RemoteControlChip(
+                    icon = Icons.Default.PowerSettingsNew,
+                    label = if (isCameraInStandby) "Start Cam" else "End Cam",
+                    accentColor = if (isCameraInStandby) EmeraldGlow else RoseDestructive,
+                    containerColor = if (isCameraInStandby) EmeraldConnected.copy(alpha = 0.22f) else RoseDestructive.copy(alpha = 0.18f),
+                    testTag = "remote_power_broadcast_button",
+                    onClick = onStartOrEndBroadcast,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteControlChip(
+    icon: ImageVector,
+    label: String,
+    accentColor: Color,
+    containerColor: Color,
+    testTag: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = containerColor,
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.45f)),
+        modifier = modifier
+            .height(48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(bounded = true, color = accentColor),
+                onClick = onClick
+            )
+            .testTag(testTag)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 6.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = accentColor,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                text = label,
+                color = SlateTextPrimary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraStandbyOverlay(
+    channelId: String,
+    onStartBroadcastRemotely: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.padding(horizontal = 32.dp)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(84.dp)
+                .clip(CircleShape)
+                .background(AmberWarning.copy(alpha = 0.14f))
+                .border(1.5.dp, AmberWarning.copy(alpha = 0.45f), CircleShape)
+        ) {
+            Icon(
+                imageVector = Icons.Default.PowerSettingsNew,
+                contentDescription = "Camera in Standby",
+                tint = AmberWarning,
+                modifier = Modifier.size(40.dp)
+            )
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "Broadcast Ended (Standby)",
+                color = SlateTextPrimary,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "Camera & mic are turned off on '$channelId'.\nTap below to remotely start broadcasting again.",
+                color = SlateTextSecondary,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center
+            )
+        }
+
+        Button(
+            onClick = onStartBroadcastRemotely,
+            colors = ButtonDefaults.buttonColors(containerColor = EmeraldConnected),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .height(50.dp)
+                .testTag("viewer_start_broadcast_remote_button")
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(horizontal = 8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    tint = SlateDark950,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = "Start Broadcast Remotely",
+                    color = SlateDark950,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 14.sp
+                )
             }
         }
     }
@@ -561,7 +827,7 @@ private fun RecordActionButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
-            .size(58.dp)
+            .size(56.dp)
             .scale(if (isRecording) pulseScale else 1f)
             .clip(CircleShape)
             .background(bgColor)
@@ -586,7 +852,7 @@ private fun RecordActionButton(
                     imageVector = Icons.Default.Stop,
                     contentDescription = "Stop Recording",
                     tint = Color.White,
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier.size(26.dp)
                 )
             }
             else -> {
@@ -594,7 +860,7 @@ private fun RecordActionButton(
                     imageVector = Icons.Default.FiberManualRecord,
                     contentDescription = "Start Recording Live Feed",
                     tint = if (isEnabled) RoseDestructive else SlateDark700,
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier.size(26.dp)
                 )
             }
         }
@@ -756,7 +1022,7 @@ private fun RecordingSavedCard(
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.95f)),
         border = BorderStroke(1.dp, EmeraldConnected.copy(alpha = 0.55f)),
-        modifier = modifier.widthIn(max = 420.dp)
+        modifier = modifier.widthIn(max = 460.dp)
     ) {
         Column(
             modifier = Modifier.padding(14.dp),

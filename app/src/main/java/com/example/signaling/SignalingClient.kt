@@ -21,6 +21,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class SignalingClient(
@@ -51,11 +52,14 @@ class SignalingClient(
     private var restPollingJob: Job? = null
     private val processedCandidateKeys = mutableSetOf<String>()
 
-    // Deduplication guards so RTDB snapshots don't re-apply identical SDPs or events
+    // Deduplication guards so RTDB snapshots don't re-apply identical SDPs or commands
     private var lastAppliedAnswerSdp: String? = null
     private var lastAppliedOfferSessionKey: String? = null
     private var lastAppliedReconnectTs: Long = 0L
+    private var lastProcessedCommandId: String? = null
+    private var broadcastStartedAtMs: Long = 0L
     private var hasNotifiedViewerLeftForSession: Boolean = false
+    private var lastStandbyNotified: Boolean = false
 
     init {
         initFirebaseDatabase()
@@ -85,9 +89,15 @@ class SignalingClient(
 
     /**
      * Publishes a live surveillance broadcast offer on `rooms/{channelId}`.
-     * Clears any previous viewer answer/candidates so a fresh viewer can connect immediately.
+     * Clears any previous viewer answer/candidates and stale commands so a fresh viewer can connect immediately.
      */
-    fun startBroadcast(channelId: String, sdpOffer: String, sessionId: String) {
+    fun startBroadcast(
+        channelId: String,
+        sdpOffer: String,
+        sessionId: String,
+        isFrontCamera: Boolean = false,
+        isMicEnabled: Boolean = true
+    ) {
         cleanupListenersOnly()
         this.currentRoomId = channelId
         this.isBroadcaster = true
@@ -95,17 +105,25 @@ class SignalingClient(
         lastAppliedAnswerSdp = null
         lastAppliedOfferSessionKey = null
         hasNotifiedViewerLeftForSession = false
+        broadcastStartedAtMs = System.currentTimeMillis()
 
         val offerMap = mapOf(
             "sdp" to sdpOffer,
             "type" to "OFFER",
             "sessionId" to sessionId
         )
+        val mediaMap = mapOf(
+            "cameraEnabled" to true,
+            "micEnabled" to isMicEnabled,
+            "isFrontCamera" to isFrontCamera,
+            "broadcastActive" to true
+        )
         val roomMap = mapOf(
             "caller" to offerMap,
+            "callerMedia" to mediaMap,
             "status" to "broadcasting",
             "sessionId" to sessionId,
-            "createdAt" to System.currentTimeMillis()
+            "createdAt" to broadcastStartedAtMs
         )
 
         val db = firebaseDb
@@ -131,8 +149,46 @@ class SignalingClient(
     }
 
     /**
+     * Transitions the Broadcaster channel into Remote Standby:
+     * removes active SDP/candidates and marks status = "standby", while keeping the Broadcaster
+     * listener active so it can instantly execute a remote START_BROADCAST command from the Viewer.
+     */
+    fun enterStandbyMode(isFrontCamera: Boolean) {
+        val channelId = currentRoomId ?: return
+        processedCandidateKeys.clear()
+        lastAppliedAnswerSdp = null
+        hasNotifiedViewerLeftForSession = false
+
+        val mediaMap = mapOf(
+            "cameraEnabled" to false,
+            "micEnabled" to false,
+            "isFrontCamera" to isFrontCamera,
+            "broadcastActive" to false
+        )
+        val standbyMap = mapOf(
+            "status" to "standby",
+            "callerMedia" to mediaMap,
+            "updatedAt" to System.currentTimeMillis()
+        )
+
+        val ref = roomRef
+        if (ref != null) {
+            ref.setValue(standbyMap).addOnFailureListener { err ->
+                Log.w(TAG, "Firebase enterStandbyMode failed: ${err.message}")
+                scope.launch {
+                    postRestData("rooms/$channelId", JSONObject(standbyMap).toString())
+                }
+            }
+        } else {
+            scope.launch {
+                postRestData("rooms/$channelId", JSONObject(standbyMap).toString())
+            }
+        }
+    }
+
+    /**
      * Joins a surveillance channel as a Viewer (recvonly).
-     * Automatically waits if the Broadcaster hasn't started yet and connects the moment an offer appears!
+     * Automatically waits if the Broadcaster hasn't started yet and detects Standby or Live state immediately.
      */
     fun joinAsViewer(channelId: String) {
         cleanupListenersOnly()
@@ -141,6 +197,7 @@ class SignalingClient(
         processedCandidateKeys.clear()
         lastAppliedOfferSessionKey = null
         lastAppliedReconnectTs = 0L
+        lastStandbyNotified = false
 
         val db = firebaseDb
         if (db != null) {
@@ -155,6 +212,28 @@ class SignalingClient(
             }
         } else {
             startRestPolling(channelId)
+        }
+    }
+
+    /**
+     * Sends a remote control command from the Viewer to the Broadcaster.
+     */
+    fun sendRemoteCommand(action: RemoteCommandAction, value: Boolean = false) {
+        val channelId = currentRoomId ?: return
+        val cmdId = "cmd_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+        val cmdMap = mapOf(
+            "id" to cmdId,
+            "action" to action.name,
+            "value" to value,
+            "timestamp" to System.currentTimeMillis()
+        )
+        Log.d(TAG, "Sending remote command to '$channelId': $action (value=$value, id=$cmdId)")
+        val ref = roomRef
+        if (ref != null) {
+            ref.child("remoteCommand").setValue(cmdMap)
+        }
+        scope.launch {
+            postRestData("rooms/$channelId/remoteCommand", JSONObject(cmdMap).toString())
         }
     }
 
@@ -224,16 +303,43 @@ class SignalingClient(
         }
     }
 
-    fun updateMediaState(isCameraEnabled: Boolean, isMicEnabled: Boolean) {
+    fun updateMediaState(
+        isCameraEnabled: Boolean,
+        isMicEnabled: Boolean,
+        isFrontCamera: Boolean = false,
+        broadcastActive: Boolean = true
+    ) {
         val roomId = currentRoomId ?: return
         val targetPath = if (isBroadcaster) "callerMedia" else "calleeMedia"
         val stateMap = mapOf(
             "cameraEnabled" to isCameraEnabled,
-            "micEnabled" to isMicEnabled
+            "micEnabled" to isMicEnabled,
+            "isFrontCamera" to isFrontCamera,
+            "broadcastActive" to broadcastActive
         )
         roomRef?.child(targetPath)?.setValue(stateMap)
         scope.launch {
             postRestData("rooms/$roomId/$targetPath", JSONObject(stateMap).toString())
+        }
+    }
+
+    private fun handleIncomingCommand(id: String?, actionName: String?, value: Boolean, timestamp: Long) {
+        if (id.isNullOrBlank() || actionName.isNullOrBlank()) return
+        if (id == lastProcessedCommandId) return
+        // Ignore stale commands left over from before this broadcaster session booted
+        if (timestamp > 0L && timestamp < broadcastStartedAtMs - 15_000L) return
+
+        val action = try {
+            RemoteCommandAction.valueOf(actionName)
+        } catch (_: Exception) {
+            return
+        }
+
+        lastProcessedCommandId = id
+        val cmd = RemoteCommand(id = id, action = action, value = value, timestamp = timestamp)
+        Log.d(TAG, "Broadcaster received remote command: $cmd")
+        scope.launch {
+            _events.emit(SignalingEvent.RemoteCommandReceived(cmd))
         }
     }
 
@@ -242,7 +348,17 @@ class SignalingClient(
             override fun onDataChange(snapshot: DataSnapshot) {
                 if (!snapshot.exists()) return
 
-                // 1. Check incoming viewer answer
+                // 1. Check incoming remote control command from Viewer
+                val cmdSnap = snapshot.child("remoteCommand")
+                if (cmdSnap.exists()) {
+                    val cmdId = cmdSnap.child("id").getValue(String::class.java)
+                    val actionName = cmdSnap.child("action").getValue(String::class.java)
+                    val value = cmdSnap.child("value").getValue(Boolean::class.java) ?: false
+                    val ts = cmdSnap.child("timestamp").getValue(Long::class.java) ?: 0L
+                    handleIncomingCommand(cmdId, actionName, value, ts)
+                }
+
+                // 2. Check incoming viewer answer
                 val calleeSnap = snapshot.child("callee")
                 val answerSdp = calleeSnap.child("sdp").getValue(String::class.java)
                 if (!answerSdp.isNullOrBlank() && answerSdp != lastAppliedAnswerSdp) {
@@ -252,7 +368,7 @@ class SignalingClient(
                     }
                 }
 
-                // 2. Check channel status
+                // 3. Check channel status
                 val status = snapshot.child("status").getValue(String::class.java)
                 when (status) {
                     "viewer_left" -> {
@@ -291,23 +407,48 @@ class SignalingClient(
                 val sessionId = callerSnap.child("sessionId").getValue(String::class.java) ?: ""
                 val reconnectTs = callerSnap.child("reconnectTimestamp").getValue(Long::class.java) ?: 0L
 
-                // Handle broadcaster stopped
-                if (status == "ended" && lastAppliedOfferSessionKey != null) {
-                    lastAppliedOfferSessionKey = null
-                    scope.launch {
-                        _events.emit(SignalingEvent.PeerDisconnected("Broadcast stopped by camera"))
-                    }
-                    return
-                }
-
-                // Check broadcaster media state (camera paused / mic muted)
+                // Check broadcaster media state (camera paused / mic muted / front-or-rear / broadcastActive)
                 val mediaSnap = snapshot.child("callerMedia")
                 if (mediaSnap.exists()) {
                     val cameraEnabled = mediaSnap.child("cameraEnabled").getValue(Boolean::class.java) ?: true
                     val micEnabled = mediaSnap.child("micEnabled").getValue(Boolean::class.java) ?: true
+                    val isFront = mediaSnap.child("isFrontCamera").getValue(Boolean::class.java) ?: false
+                    val broadcastActive = mediaSnap.child("broadcastActive").getValue(Boolean::class.java) ?: (status != "standby")
                     scope.launch {
-                        _events.emit(SignalingEvent.PeerMediaStateChanged(cameraEnabled, micEnabled))
+                        _events.emit(
+                            SignalingEvent.PeerMediaStateChanged(
+                                isCameraEnabled = cameraEnabled,
+                                isMicEnabled = micEnabled,
+                                isFrontCamera = isFront,
+                                broadcastActive = broadcastActive
+                            )
+                        )
                     }
+                }
+
+                // Handle broadcaster in Remote Standby (armed & waiting for remote START_BROADCAST)
+                if (status == "standby") {
+                    lastAppliedOfferSessionKey = null
+                    processedCandidateKeys.clear()
+                    if (!lastStandbyNotified) {
+                        lastStandbyNotified = true
+                        scope.launch {
+                            _events.emit(SignalingEvent.BroadcastStandby)
+                        }
+                    }
+                    return
+                } else {
+                    lastStandbyNotified = false
+                }
+
+                // Handle broadcaster completely exited
+                if (status == "ended" && lastAppliedOfferSessionKey != null) {
+                    lastAppliedOfferSessionKey = null
+                    processedCandidateKeys.clear()
+                    scope.launch {
+                        _events.emit(SignalingEvent.PeerDisconnected("Broadcast stopped by camera"))
+                    }
+                    return
                 }
 
                 // Pick up fresh broadcast offer OR reconnect offer
@@ -397,7 +538,7 @@ class SignalingClient(
         restPollingJob = scope.launch {
             val baseUrl = getRestBaseUrl()
             while (isActive) {
-                delay(1200)
+                delay(1000)
                 try {
                     val url = "$baseUrl/rooms/$channelId.json"
                     val request = Request.Builder().url(url).get().build()
@@ -408,6 +549,17 @@ class SignalingClient(
                         val status = json.optString("status")
 
                         if (isBroadcaster) {
+                            // Check remote command
+                            val cmdObj = json.optJSONObject("remoteCommand")
+                            if (cmdObj != null) {
+                                handleIncomingCommand(
+                                    id = cmdObj.optString("id"),
+                                    actionName = cmdObj.optString("action"),
+                                    value = cmdObj.optBoolean("value", false),
+                                    timestamp = cmdObj.optLong("timestamp", 0L)
+                                )
+                            }
+
                             if (json.has("callee")) {
                                 val calleeObj = json.optJSONObject("callee")
                                 val sdp = calleeObj?.optString("sdp")
@@ -421,25 +573,49 @@ class SignalingClient(
                                 _events.emit(SignalingEvent.ViewerLeft(System.currentTimeMillis()))
                             }
                         } else {
-                            if (status == "ended" && lastAppliedOfferSessionKey != null) {
+                            // Viewer reads callerMedia state
+                            val mediaObj = json.optJSONObject("callerMedia")
+                            if (mediaObj != null) {
+                                _events.emit(
+                                    SignalingEvent.PeerMediaStateChanged(
+                                        isCameraEnabled = mediaObj.optBoolean("cameraEnabled", true),
+                                        isMicEnabled = mediaObj.optBoolean("micEnabled", true),
+                                        isFrontCamera = mediaObj.optBoolean("isFrontCamera", false),
+                                        broadcastActive = mediaObj.optBoolean("broadcastActive", status != "standby")
+                                    )
+                                )
+                            }
+
+                            if (status == "standby") {
                                 lastAppliedOfferSessionKey = null
-                                _events.emit(SignalingEvent.PeerDisconnected("Broadcast stopped by camera"))
-                            } else if (json.has("caller") && (status == "broadcasting" || status == "reconnecting")) {
-                                val callerObj = json.optJSONObject("caller")
-                                val offerSdp = callerObj?.optString("sdp")
-                                val sessionId = callerObj?.optString("sessionId") ?: ""
-                                val reconnectTs = callerObj?.optLong("reconnectTimestamp", 0L) ?: 0L
-                                if (!offerSdp.isNullOrBlank()) {
-                                    val offerKey = "${sessionId}_${reconnectTs}_${offerSdp.hashCode()}"
-                                    if (offerKey != lastAppliedOfferSessionKey) {
-                                        lastAppliedOfferSessionKey = offerKey
-                                        _events.emit(
-                                            SignalingEvent.OfferReceived(
-                                                sdp = offerSdp,
-                                                sessionId = sessionId,
-                                                isReconnect = reconnectTs > 0L
+                                processedCandidateKeys.clear()
+                                if (!lastStandbyNotified) {
+                                    lastStandbyNotified = true
+                                    _events.emit(SignalingEvent.BroadcastStandby)
+                                }
+                            } else {
+                                lastStandbyNotified = false
+                                if (status == "ended" && lastAppliedOfferSessionKey != null) {
+                                    lastAppliedOfferSessionKey = null
+                                    processedCandidateKeys.clear()
+                                    _events.emit(SignalingEvent.PeerDisconnected("Broadcast stopped by camera"))
+                                } else if (json.has("caller") && (status == "broadcasting" || status == "reconnecting")) {
+                                    val callerObj = json.optJSONObject("caller")
+                                    val offerSdp = callerObj?.optString("sdp")
+                                    val sessionId = callerObj?.optString("sessionId") ?: ""
+                                    val reconnectTs = callerObj?.optLong("reconnectTimestamp", 0L) ?: 0L
+                                    if (!offerSdp.isNullOrBlank()) {
+                                        val offerKey = "${sessionId}_${reconnectTs}_${offerSdp.hashCode()}"
+                                        if (offerKey != lastAppliedOfferSessionKey) {
+                                            lastAppliedOfferSessionKey = offerKey
+                                            _events.emit(
+                                                SignalingEvent.OfferReceived(
+                                                    sdp = offerSdp,
+                                                    sessionId = sessionId,
+                                                    isReconnect = reconnectTs > 0L
+                                                )
                                             )
-                                        )
+                                        }
                                     }
                                 }
                             }
@@ -529,6 +705,8 @@ class SignalingClient(
         lastAppliedAnswerSdp = null
         lastAppliedOfferSessionKey = null
         lastAppliedReconnectTs = 0L
+        lastProcessedCommandId = null
         hasNotifiedViewerLeftForSession = false
+        lastStandbyNotified = false
     }
 }

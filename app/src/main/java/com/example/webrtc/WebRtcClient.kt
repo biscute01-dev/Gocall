@@ -111,6 +111,9 @@ class WebRtcClient(private val context: Context) {
     private val _isRemoteAudioMuted = MutableStateFlow(false)
     val isRemoteAudioMuted: StateFlow<Boolean> = _isRemoteAudioMuted.asStateFlow()
 
+    private val _localVideoTrackFlow = MutableStateFlow<VideoTrack?>(null)
+    val localVideoTrackFlow: StateFlow<VideoTrack?> = _localVideoTrackFlow.asStateFlow()
+
     private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
     val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
 
@@ -228,6 +231,7 @@ class WebRtcClient(private val context: Context) {
             }
             localVideoTrack = factory.createVideoTrack("ARDAMSv0", videoSource)
             localVideoTrack?.setEnabled(_isCameraEnabled.value)
+            _localVideoTrackFlow.value = localVideoTrack
         }
     }
 
@@ -590,6 +594,78 @@ class WebRtcClient(private val context: Context) {
         }
     }
 
+    /**
+     * Pauses camera, microphone, and PeerConnection for Remote Standby mode
+     * while keeping PeerConnectionFactory and EglBase alive for instant remote restart.
+     */
+    fun pauseBroadcastForStandby() {
+        Log.d(TAG, "Pausing broadcast media & PeerConnection for Remote Standby...")
+        _localVideoTrackFlow.value = null
+        try {
+            videoCapturer?.stopCapture()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping capturer for standby: ${e.message}")
+        }
+        try {
+            videoCapturer?.dispose()
+        } catch (_: Exception) {}
+        videoCapturer = null
+
+        try {
+            videoSource?.dispose()
+        } catch (_: Exception) {}
+        videoSource = null
+
+        try {
+            surfaceTextureHelper?.dispose()
+        } catch (_: Exception) {}
+        surfaceTextureHelper = null
+
+        try {
+            localAudioTrack?.setEnabled(false)
+            localAudioTrack?.dispose()
+        } catch (_: Exception) {}
+        localAudioTrack = null
+
+        try {
+            audioSource?.dispose()
+        } catch (_: Exception) {}
+        audioSource = null
+
+        try {
+            localVideoTrack?.setEnabled(false)
+            localVideoTrack?.dispose()
+        } catch (_: Exception) {}
+        localVideoTrack = null
+
+        try {
+            peerConnection?.close()
+            peerConnection?.dispose()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error disposing PeerConnection for standby: ${e.message}")
+        }
+        peerConnection = null
+        _iceConnectionState.value = PeerConnection.IceConnectionState.CLOSED
+        _connectionState.value = PeerConnection.PeerConnectionState.CLOSED
+    }
+
+    /**
+     * Restarts local camera/mic capture and creates a fresh PeerConnection + SDP Offer
+     * when waking up from Remote Standby.
+     */
+    fun resumeBroadcastFromStandby(
+        preferBackCamera: Boolean,
+        enableAudio: Boolean,
+        onSdpCreated: (SessionDescription) -> Unit
+    ) {
+        Log.d(TAG, "Resuming broadcast from Remote Standby (preferBack=$preferBackCamera, audio=$enableAudio)...")
+        _isCameraEnabled.value = true
+        _isMicEnabled.value = enableAudio
+        startLocalMedia(preferBackCamera = preferBackCamera, enableAudio = enableAudio)
+        createPeerConnection(SurveillanceRole.BROADCASTER)
+        createOffer(onSdpCreated = onSdpCreated, iceRestart = false, isBroadcaster = true)
+    }
+
     fun toggleMicrophone(enabled: Boolean? = null): Boolean {
         val newState = enabled ?: !_isMicEnabled.value
         _isMicEnabled.value = newState
@@ -828,6 +904,7 @@ class WebRtcClient(private val context: Context) {
         peerConnection?.dispose()
         peerConnection = null
 
+        _localVideoTrackFlow.value = null
         _remoteVideoTrack.value = null
         _iceConnectionState.value = PeerConnection.IceConnectionState.CLOSED
         _connectionState.value = PeerConnection.PeerConnectionState.CLOSED

@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,10 +29,15 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QueryStats
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -62,6 +66,7 @@ import com.example.ui.components.CallActionButton
 import com.example.ui.components.StatusPill
 import com.example.ui.components.formatCallDuration
 import com.example.ui.theme.AmberWarning
+import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.CyanGlow
 import com.example.ui.theme.EmeraldConnected
 import com.example.ui.theme.EmeraldGlow
@@ -91,25 +96,104 @@ fun BroadcastScreen(
     val callState by viewModel.callState.collectAsState()
     val channelId by viewModel.currentRoomId.collectAsState()
     val durationSeconds by viewModel.callDurationSeconds.collectAsState()
+    val localVideoTrack by viewModel.localVideoTrack.collectAsState()
     val isCameraEnabled by viewModel.isCameraEnabled.collectAsState()
     val isMicEnabled by viewModel.isMicEnabled.collectAsState()
     val isFrontCamera by viewModel.isFrontCamera.collectAsState()
     val isStealthMode by viewModel.isStealthMode.collectAsState()
     val showLiveHud by viewModel.showLiveHud.collectAsState()
     val liveStats by viewModel.liveStats.collectAsState()
+    val remoteCommandBanner by viewModel.remoteCommandBanner.collectAsState()
 
     val webRtcClient = viewModel.webRtcClient
     val isViewerConnected = callState is CallState.Connected
+    val isStandby = callState is CallState.Standby
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 1. Full-bleed Live Camera Preview
-        if (webRtcClient != null && isCameraEnabled) {
+        // 1. Full-bleed Live Camera Preview OR Armed Standby Screen
+        if (isStandby) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(SlateDark900, SlateDark950)
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(80.dp)
+                            .clip(CircleShape)
+                            .background(CyanAccent.copy(alpha = 0.14f))
+                            .border(1.5.dp, CyanGlow.copy(alpha = 0.45f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PowerSettingsNew,
+                            contentDescription = "Remote Standby",
+                            tint = CyanGlow,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "Standby • Armed",
+                        color = SlateTextPrimary,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+
+                    Text(
+                        text = "Camera & mic are turned off to save battery.\nListening on '${channelId ?: ""}' — the Viewer can remotely start broadcast anytime.",
+                        color = SlateTextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Button(
+                        onClick = { viewModel.resumeBroadcasterFromStandby(fromRemote = false) },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldConnected),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("broadcast_resume_local_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = SlateDark950,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "Start Broadcast Now",
+                                color = SlateDark950,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+        } else if (webRtcClient != null && isCameraEnabled) {
             LocalVideoView(
                 webRtcClient = webRtcClient,
+                videoTrack = localVideoTrack,
                 isMirror = isFrontCamera,
                 modifier = Modifier.fillMaxSize()
             )
@@ -160,7 +244,7 @@ fun BroadcastScreen(
                 .height(140.dp)
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)
+                        colors = listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent)
                     )
                 )
         )
@@ -171,7 +255,7 @@ fun BroadcastScreen(
                 .align(Alignment.BottomCenter)
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))
+                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f))
                     )
                 )
         )
@@ -188,8 +272,9 @@ fun BroadcastScreen(
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val (statusLabel, statusColor, pulse) = when (callState) {
                     is CallState.Connected -> Triple("LIVE • VIEWER ON", EmeraldGlow, true)
+                    is CallState.Standby -> Triple("STANDBY • ARMED", CyanGlow, false)
                     is CallState.Reconnecting -> Triple("RECONNECTING", RoseDestructive, true)
-                    else -> Triple("ON AIR • STANDBY", AmberWarning, true)
+                    else -> Triple("ON AIR • READY", AmberWarning, true)
                 }
                 StatusPill(
                     text = statusLabel,
@@ -197,7 +282,6 @@ fun BroadcastScreen(
                     isPulsing = pulse
                 )
 
-                // Channel code chip (tap to copy)
                 Surface(
                     shape = RoundedCornerShape(10.dp),
                     color = GlassDarkControls,
@@ -229,12 +313,14 @@ fun BroadcastScreen(
                             tint = SlateTextSecondary,
                             modifier = Modifier.size(13.dp)
                         )
-                        Text(
-                            text = "• ${formatCallDuration(durationSeconds)}",
-                            color = SlateTextSecondary,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
+                        if (!isStandby) {
+                            Text(
+                                text = "• ${formatCallDuration(durationSeconds)}",
+                                color = SlateTextSecondary,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                     }
                 }
             }
@@ -261,9 +347,45 @@ fun BroadcastScreen(
             }
         }
 
+        // 2b. Remote Command Executed Toast Pill
+        AnimatedVisibility(
+            visible = remoteCommandBanner != null && !isStealthMode,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 86.dp, start = 20.dp, end = 20.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = SlateDark900.copy(alpha = 0.94f),
+                border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.55f))
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Sensors,
+                        contentDescription = null,
+                        tint = CyanGlow,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = remoteCommandBanner ?: "",
+                        color = SlateTextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
         // 3. Optional Outbound Stats HUD
         AnimatedVisibility(
-            visible = showLiveHud && !isStealthMode,
+            visible = showLiveHud && !isStealthMode && !isStandby,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -274,8 +396,8 @@ fun BroadcastScreen(
             BroadcastStatsCard(stats = liveStats, isViewerConnected = isViewerConnected)
         }
 
-        // 4. Subtle Standby Hint when no viewer is connected yet
-        if (!isViewerConnected && !isStealthMode) {
+        // 4. Subtle Standby Hint when live & waiting for viewer
+        if (!isViewerConnected && !isStandby && !isStealthMode) {
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = GlassDarkControls,
@@ -286,7 +408,7 @@ fun BroadcastScreen(
                     .padding(bottom = 114.dp, start = 20.dp, end = 20.dp)
             ) {
                 Text(
-                    text = "Ready • Open CamGuard on another device and tap View on '${channelId ?: ""}'",
+                    text = "Ready • Open CamGuard on viewer phone & tap View on '${channelId ?: ""}' (Remote Control Enabled)",
                     color = SlateTextPrimary,
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
@@ -317,32 +439,43 @@ fun BroadcastScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CallActionButton(
-                        icon = Icons.Default.Cameraswitch,
-                        contentDescription = if (isFrontCamera) "Switch to Rear Camera" else "Switch to Front Camera",
-                        onClick = { viewModel.switchCamera() },
-                        isActive = true,
-                        size = 52.dp,
-                        testTag = "broadcast_flip_camera"
-                    )
+                    if (!isStandby) {
+                        CallActionButton(
+                            icon = Icons.Default.Cameraswitch,
+                            contentDescription = if (isFrontCamera) "Switch to Rear Camera" else "Switch to Front Camera",
+                            onClick = { viewModel.switchCamera() },
+                            isActive = true,
+                            size = 52.dp,
+                            testTag = "broadcast_flip_camera"
+                        )
 
-                    CallActionButton(
-                        icon = if (isMicEnabled) Icons.Default.Mic else Icons.Default.MicOff,
-                        contentDescription = if (isMicEnabled) "Mute Audio Broadcast" else "Unmute Audio Broadcast",
-                        onClick = { viewModel.toggleMicrophone() },
-                        isActive = isMicEnabled,
-                        size = 52.dp,
-                        testTag = "broadcast_mic_toggle"
-                    )
+                        CallActionButton(
+                            icon = if (isMicEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                            contentDescription = if (isMicEnabled) "Mute Audio Broadcast" else "Unmute Audio Broadcast",
+                            onClick = { viewModel.toggleMicrophone() },
+                            isActive = isMicEnabled,
+                            size = 52.dp,
+                            testTag = "broadcast_mic_toggle"
+                        )
 
-                    CallActionButton(
-                        icon = if (isCameraEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
-                        contentDescription = if (isCameraEnabled) "Pause Camera" else "Resume Camera",
-                        onClick = { viewModel.toggleCamera() },
-                        isActive = isCameraEnabled,
-                        size = 52.dp,
-                        testTag = "broadcast_camera_toggle"
-                    )
+                        CallActionButton(
+                            icon = if (isCameraEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
+                            contentDescription = if (isCameraEnabled) "Pause Camera" else "Resume Camera",
+                            onClick = { viewModel.toggleCamera() },
+                            isActive = isCameraEnabled,
+                            size = 52.dp,
+                            testTag = "broadcast_camera_toggle"
+                        )
+                    } else {
+                        CallActionButton(
+                            icon = Icons.Default.PlayArrow,
+                            contentDescription = "Start Broadcast",
+                            onClick = { viewModel.resumeBroadcasterFromStandby(fromRemote = false) },
+                            isActive = true,
+                            size = 52.dp,
+                            testTag = "broadcast_dock_resume_button"
+                        )
+                    }
 
                     CallActionButton(
                         icon = Icons.Default.DarkMode,
@@ -355,7 +488,7 @@ fun BroadcastScreen(
 
                     CallActionButton(
                         icon = Icons.Default.Stop,
-                        contentDescription = "Stop Broadcast",
+                        contentDescription = "Exit Broadcast Mode",
                         onClick = onStopBroadcast,
                         isDestructive = true,
                         size = 58.dp,
@@ -365,7 +498,7 @@ fun BroadcastScreen(
             }
         }
 
-        // 6. Stealth / OLED Blackout Overlay (saves battery & dims camera device while staying live)
+        // 6. Stealth / OLED Blackout Overlay (keeps camera/remote-control armed with zero glare)
         AnimatedVisibility(
             visible = isStealthMode,
             enter = fadeIn(),
@@ -392,10 +525,20 @@ fun BroadcastScreen(
                         modifier = Modifier
                             .size(8.dp)
                             .clip(CircleShape)
-                            .background(if (isViewerConnected) EmeraldConnected.copy(alpha = 0.55f) else RoseDestructive.copy(alpha = 0.45f))
+                            .background(
+                                when {
+                                    isStandby -> CyanGlow.copy(alpha = 0.45f)
+                                    isViewerConnected -> EmeraldConnected.copy(alpha = 0.55f)
+                                    else -> RoseDestructive.copy(alpha = 0.45f)
+                                }
+                            )
                     )
                     Text(
-                        text = if (isViewerConnected) "LIVE • STEALTH MODE" else "ON AIR • STEALTH MODE",
+                        text = when {
+                            isStandby -> "STANDBY • ARMED (STEALTH)"
+                            isViewerConnected -> "LIVE • STEALTH MODE"
+                            else -> "ON AIR • STEALTH MODE"
+                        },
                         color = SlateTextMuted.copy(alpha = 0.55f),
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
