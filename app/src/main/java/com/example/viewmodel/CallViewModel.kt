@@ -1,15 +1,20 @@
 package com.example.viewmodel
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AppAudioManager
 import com.example.service.CallForegroundService
 import com.example.signaling.IceCandidateModel
+import com.example.signaling.OnlineDevice
 import com.example.signaling.RemoteCommand
 import com.example.signaling.RemoteCommandAction
 import com.example.signaling.SignalingClient
@@ -39,22 +44,22 @@ import org.webrtc.VideoTrack
 import java.io.File
 import java.util.Locale
 import java.util.UUID
-import kotlin.random.Random
 
 enum class SurveillanceMode {
     NONE,
+    DEVICE_LIST,
     BROADCAST,
     VIEW
 }
 
 sealed class CallState {
     object Idle : CallState()
-    data class WaitingForPeer(val channelId: String) : CallState()
-    data class JoiningCall(val channelId: String) : CallState()
-    data class Standby(val channelId: String) : CallState()
-    data class Connected(val channelId: String, val durationSeconds: Long = 0) : CallState()
+    data class WaitingForPeer(val deviceName: String) : CallState()
+    data class JoiningCall(val deviceName: String) : CallState()
+    data class Standby(val deviceName: String) : CallState()
+    data class Connected(val deviceName: String, val durationSeconds: Long = 0) : CallState()
     data class Reconnecting(
-        val channelId: String,
+        val deviceName: String,
         val attempt: Int,
         val reason: String,
         val maxAttempts: Int = 30
@@ -78,9 +83,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG = "CallViewModel"
         private const val PREFS_NAME = "camguard_prefs"
         private const val KEY_CUSTOM_RTDB = "custom_rtdb_url"
-        private const val KEY_ACTIVE_CHANNEL = "active_channel_id"
-        private const val KEY_RECENT_CHANNELS = "recent_channels"
-        const val DEFAULT_CHANNEL_ID = "cam-01"
+        private const val KEY_DEVICE_ID = "device_id"
+        private const val KEY_DEVICE_NAME = "device_name"
 
         @Volatile
         var activeInstance: CallViewModel? = null
@@ -88,6 +92,23 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    val myDeviceId: String = prefs.getString(KEY_DEVICE_ID, null)?.takeIf { it.isNotBlank() }
+        ?: ("dev_" + UUID.randomUUID().toString().replace("-", "").take(10)).also {
+            prefs.edit().putString(KEY_DEVICE_ID, it).apply()
+        }
+
+    private fun buildDefaultDeviceName(): String {
+        val mfg = Build.MANUFACTURER?.trim().orEmpty()
+        val model = Build.MODEL?.trim().orEmpty()
+        val raw = when {
+            model.isBlank() -> "Android Camera"
+            mfg.isNotBlank() && model.startsWith(mfg, ignoreCase = true) -> model
+            mfg.isNotBlank() -> "${mfg.replaceFirstChar { it.uppercase(Locale.US) }} $model"
+            else -> model
+        }
+        return raw.take(26)
+    }
 
     var webRtcClient: WebRtcClient? = null
         private set
@@ -97,17 +118,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     val audioManager: AppAudioManager = AppAudioManager(application)
 
+    private val _deviceName = MutableStateFlow(
+        prefs.getString(KEY_DEVICE_NAME, null)?.takeIf { it.isNotBlank() } ?: buildDefaultDeviceName()
+    )
+    val deviceName: StateFlow<String> = _deviceName.asStateFlow()
+
+    private val _onlineDevices = MutableStateFlow<List<OnlineDevice>>(emptyList())
+    val onlineDevices: StateFlow<List<OnlineDevice>> = _onlineDevices.asStateFlow()
+
+    private val _targetDeviceName = MutableStateFlow("")
+    val targetDeviceName: StateFlow<String> = _targetDeviceName.asStateFlow()
+
     private val _surveillanceMode = MutableStateFlow(SurveillanceMode.NONE)
     val surveillanceMode: StateFlow<SurveillanceMode> = _surveillanceMode.asStateFlow()
 
     private val _callState = MutableStateFlow<CallState>(CallState.Idle)
     val callState: StateFlow<CallState> = _callState.asStateFlow()
-
-    private val _activeChannelId = MutableStateFlow(
-        prefs.getString(KEY_ACTIVE_CHANNEL, DEFAULT_CHANNEL_ID)?.takeIf { it.isNotBlank() }
-            ?: DEFAULT_CHANNEL_ID
-    )
-    val activeChannelId: StateFlow<String> = _activeChannelId.asStateFlow()
 
     private val _currentRoomId = MutableStateFlow<String?>(null)
     val currentRoomId: StateFlow<String?> = _currentRoomId.asStateFlow()
@@ -154,12 +180,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private val _isStealthMode = MutableStateFlow(false)
     val isStealthMode: StateFlow<Boolean> = _isStealthMode.asStateFlow()
 
-    // Transient feedback banner when a remote command is sent or executed
     private val _remoteCommandBanner = MutableStateFlow<String?>(null)
     val remoteCommandBanner: StateFlow<String?> = _remoteCommandBanner.asStateFlow()
 
-    private val _recentChannels = MutableStateFlow<List<String>>(loadRecentChannels())
-    val recentChannels: StateFlow<List<String>> = _recentChannels.asStateFlow()
+    // Set when a remote viewer triggers START_BROADCAST on this device before camera permission is granted
+    private val _pendingRemoteBroadcastWake = MutableStateFlow(false)
+    val pendingRemoteBroadcastWake: StateFlow<Boolean> = _pendingRemoteBroadcastWake.asStateFlow()
 
     private val _customDatabaseUrl = MutableStateFlow(prefs.getString(KEY_CUSTOM_RTDB, ""))
     val customDatabaseUrl: StateFlow<String?> = _customDatabaseUrl.asStateFlow()
@@ -185,6 +211,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     private var reconnectJob: Job? = null
     private var disconnectDebounceJob: Job? = null
     private var bannerClearJob: Job? = null
+    private var viewerAutoWakeJob: Job? = null
     private var webRtcObserverJobs = mutableListOf<Job>()
 
     private var broadcastAudioAllowed: Boolean = true
@@ -199,24 +226,23 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     init {
         activeInstance = this
         observeSignalingEvents()
+        signalingClient.registerDevicePresence(myDeviceId, _deviceName.value, "ready")
+        signalingClient.startObservingOnlineDevices()
     }
 
     fun setInPipMode(inPip: Boolean) {
         _isInPipMode.value = inPip
     }
 
-    fun setActiveChannelId(channelId: String) {
-        val sanitized = sanitizeChannelId(channelId)
-        _activeChannelId.value = sanitized
-        if (sanitized.isNotBlank()) {
-            prefs.edit().putString(KEY_ACTIVE_CHANNEL, sanitized).apply()
-        }
+    fun setDeviceName(name: String) {
+        val clean = name.trim().take(26).ifBlank { buildDefaultDeviceName() }
+        _deviceName.value = clean
+        prefs.edit().putString(KEY_DEVICE_NAME, clean).apply()
+        signalingClient.updateDevicePresence(deviceName = clean)
     }
 
-    fun generateRandomChannelId(): String {
-        val code = "cam-${Random.nextInt(1000, 9999)}"
-        setActiveChannelId(code)
-        return code
+    fun clearPendingRemoteBroadcastWake() {
+        _pendingRemoteBroadcastWake.value = false
     }
 
     fun setCustomDatabaseUrl(url: String) {
@@ -226,6 +252,22 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         signalingClient.updateCustomUrl(if (cleanUrl.isBlank()) null else cleanUrl)
     }
 
+    fun openDeviceList() {
+        _surveillanceMode.value = SurveillanceMode.DEVICE_LIST
+        signalingClient.updateDevicePresence(status = "ready")
+        signalingClient.startObservingOnlineDevices()
+    }
+
+    fun closeDeviceList() {
+        _surveillanceMode.value = SurveillanceMode.NONE
+        signalingClient.updateDevicePresence(status = "ready")
+    }
+
+    fun refreshOnlineDevices() {
+        signalingClient.startObservingOnlineDevices()
+        showTransientBanner("Refreshing online devices...")
+    }
+
     private fun showTransientBanner(message: String) {
         bannerClearJob?.cancel()
         _remoteCommandBanner.value = message
@@ -233,13 +275,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             delay(2500)
             _remoteCommandBanner.value = null
         }
-    }
-
-    private fun sanitizeChannelId(raw: String): String {
-        return raw.trim()
-            .lowercase(Locale.US)
-            .replace(Regex("[^a-z0-9_-]"), "-")
-            .take(24)
     }
 
     private fun initWebRtc(role: SurveillanceRole, enableAudio: Boolean = true) {
@@ -305,17 +340,15 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Single-tap BROADCAST mode (Camera Unit).
-     * Captures rear camera + optional mic and streams one-way (sendonly) on the channel.
+     * Starts BROADCAST mode for this device (either locally or triggered remotely by a Viewer!).
      */
-    fun startBroadcast(channelId: String = _activeChannelId.value, enableAudio: Boolean = true) {
-        val cleanId = sanitizeChannelId(channelId).ifBlank { DEFAULT_CHANNEL_ID }
-        setActiveChannelId(cleanId)
-        saveRecentChannel(cleanId)
-
+    fun startBroadcast(enableAudio: Boolean = true, fromRemote: Boolean = false) {
+        val label = _deviceName.value
+        _pendingRemoteBroadcastWake.value = false
         broadcastAudioAllowed = enableAudio
+
         _surveillanceMode.value = SurveillanceMode.BROADCAST
-        _currentRoomId.value = cleanId
+        _currentRoomId.value = myDeviceId
         _isCaller.value = true
         _isStealthMode.value = false
         _callDurationSeconds.value = 0L
@@ -326,19 +359,20 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         currentSessionId = UUID.randomUUID().toString().take(8)
 
         initWebRtc(role = SurveillanceRole.BROADCASTER, enableAudio = enableAudio)
-        CallForegroundService.startService(getApplication(), isBroadcaster = true, channelId = cleanId)
+        CallForegroundService.startService(getApplication(), isBroadcaster = true, channelId = label)
+        signalingClient.updateDevicePresence(status = "broadcasting")
 
         val rtc = webRtcClient ?: return
         rtc.createPeerConnection(SurveillanceRole.BROADCASTER)
-        _callState.value = CallState.WaitingForPeer(cleanId)
+        _callState.value = CallState.WaitingForPeer(label)
         startDurationTimer()
 
         rtc.createOffer(
             isBroadcaster = true,
             onSdpCreated = { sessionDescription ->
-                Log.d(TAG, "Broadcast Offer created for channel '$cleanId' (session=$currentSessionId)")
+                Log.d(TAG, "Broadcast Offer created for device '$label' ($myDeviceId, session=$currentSessionId)")
                 signalingClient.startBroadcast(
-                    channelId = cleanId,
+                    deviceId = myDeviceId,
                     sdpOffer = sessionDescription.description,
                     sessionId = currentSessionId,
                     isFrontCamera = _isFrontCamera.value,
@@ -346,19 +380,20 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         )
+
+        if (fromRemote) {
+            showTransientBanner("Started broadcast remotely")
+        }
     }
 
     /**
-     * Single-tap VIEW mode (Monitor Unit).
-     * Receive-only (recvonly) — requires zero camera or microphone permissions.
+     * Tapping any online device in View Mode immediately starts its broadcast remotely
+     * and connects straight into the live video feed!
      */
-    fun startViewing(channelId: String = _activeChannelId.value) {
-        val cleanId = sanitizeChannelId(channelId).ifBlank { DEFAULT_CHANNEL_ID }
-        setActiveChannelId(cleanId)
-        saveRecentChannel(cleanId)
-
+    fun connectToOnlineDevice(device: OnlineDevice) {
+        _targetDeviceName.value = device.deviceName
         _surveillanceMode.value = SurveillanceMode.VIEW
-        _currentRoomId.value = cleanId
+        _currentRoomId.value = device.deviceId
         _isCaller.value = false
         _isStealthMode.value = false
         _callDurationSeconds.value = 0L
@@ -375,17 +410,41 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
         initWebRtc(role = SurveillanceRole.VIEWER, enableAudio = false)
         audioManager.start()
-        CallForegroundService.startService(getApplication(), isBroadcaster = false, channelId = cleanId)
+        CallForegroundService.startService(getApplication(), isBroadcaster = false, channelId = device.deviceName)
+        signalingClient.updateDevicePresence(status = "viewing")
 
         val rtc = webRtcClient ?: return
         rtc.createPeerConnection(SurveillanceRole.VIEWER)
-        _callState.value = CallState.JoiningCall(cleanId)
+        _callState.value = CallState.JoiningCall(device.deviceName)
 
-        signalingClient.joinAsViewer(cleanId)
+        // Start listening on target device's channel AND trigger remote broadcast start!
+        signalingClient.joinAsViewer(device.deviceId)
+
+        viewerAutoWakeJob?.cancel()
+        if (device.status != "broadcasting") {
+            signalingClient.sendRemoteCommand(
+                action = RemoteCommandAction.START_BROADCAST,
+                targetDeviceId = device.deviceId
+            )
+            showTransientBanner("Starting camera on ${device.deviceName}...")
+        } else {
+            // Device says broadcasting; if an offer isn't received quickly, nudge it with START_BROADCAST
+            viewerAutoWakeJob = viewModelScope.launch {
+                delay(2500)
+                if (isActive && _surveillanceMode.value == SurveillanceMode.VIEW &&
+                    _callState.value is CallState.JoiningCall && lastViewerSessionId.isBlank()
+                ) {
+                    signalingClient.sendRemoteCommand(
+                        action = RemoteCommandAction.START_BROADCAST,
+                        targetDeviceId = device.deviceId
+                    )
+                }
+            }
+        }
     }
 
     // =========================================================================
-    // Remote Control Actions (Initiated from Viewer -> Executed by Broadcaster)
+    // Remote Control Actions (Viewer -> Broadcaster)
     // =========================================================================
 
     fun remoteSwitchCamera() {
@@ -404,12 +463,11 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     fun remoteStopBroadcast() {
         if (_surveillanceMode.value != SurveillanceMode.VIEW) return
-        // Finalize any active MP4 recording cleanly before stopping the camera
         if (remoteRecorder?.isRecording == true) {
             remoteRecorder?.stopRecording()
         }
         signalingClient.sendRemoteCommand(RemoteCommandAction.STOP_BROADCAST)
-        showTransientBanner("Remote: Ending broadcast (Standby)...")
+        showTransientBanner("Remote: Ending broadcast...")
     }
 
     fun remoteStartBroadcast() {
@@ -419,18 +477,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // =========================================================================
-    // Broadcaster Standby / Resume Lifecycle (Enables Remote Start & End)
+    // Broadcaster Standby / Resume Lifecycle
     // =========================================================================
 
-    /**
-     * Puts the Broadcaster into Armed Standby: turns OFF camera/mic hardware and closes WebRTC,
-     * while keeping the signaling channel listening so the Viewer can Start Broadcast remotely anytime.
-     */
     fun enterBroadcasterStandby(fromRemote: Boolean = false) {
-        val channelId = _currentRoomId.value ?: return
+        val label = _deviceName.value
         if (_surveillanceMode.value != SurveillanceMode.BROADCAST) return
 
-        Log.d(TAG, "Entering Broadcaster Standby (fromRemote=$fromRemote) on channel '$channelId'")
+        Log.d(TAG, "Entering Broadcaster Standby (fromRemote=$fromRemote)")
         reconnectJob?.cancel()
         disconnectDebounceJob?.cancel()
         stopStatsPolling()
@@ -438,46 +492,43 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
         webRtcClient?.pauseBroadcastForStandby()
         _localVideoTrack.value = null
-        _callState.value = CallState.Standby(channelId)
+        _callState.value = CallState.Standby(label)
 
         signalingClient.enterStandbyMode(isFrontCamera = _isFrontCamera.value)
+        signalingClient.updateDevicePresence(status = "standby")
 
         CallForegroundService.updateService(
             getApplication(),
             isBroadcaster = true,
-            channelId = channelId,
-            durationText = "Standby • Armed for remote start"
+            channelId = label,
+            durationText = "Standby • Ready for remote start"
         )
         if (fromRemote) {
-            showTransientBanner("Broadcast ended remotely (Standby)")
+            showTransientBanner("Broadcast ended remotely")
         }
     }
 
-    /**
-     * Wakes the Broadcaster from Standby, restarts camera & mic hardware,
-     * and publishes a fresh SDP Offer so the Viewer connects automatically.
-     */
     fun resumeBroadcasterFromStandby(fromRemote: Boolean = false) {
-        val channelId = _currentRoomId.value ?: return
+        val label = _deviceName.value
         val rtc = webRtcClient ?: return
         if (_surveillanceMode.value != SurveillanceMode.BROADCAST) return
 
         if (_callState.value !is CallState.Standby) {
-            // Already broadcasting; if waiting with no viewer, republish fresh offer just in case
             if (_callState.value is CallState.WaitingForPeer) {
                 resetBroadcasterForNextViewer()
             }
             return
         }
 
-        Log.d(TAG, "Resuming Broadcast from Standby (fromRemote=$fromRemote) on channel '$channelId'")
+        Log.d(TAG, "Resuming Broadcast from Standby (fromRemote=$fromRemote)")
         localCandidates = 0
         remoteCandidates = 0
         reconnectAttempts = 0
         hasReconnectedOnce = false
         _callDurationSeconds.value = 0L
         currentSessionId = UUID.randomUUID().toString().take(8)
-        _callState.value = CallState.WaitingForPeer(channelId)
+        _callState.value = CallState.WaitingForPeer(label)
+        signalingClient.updateDevicePresence(status = "broadcasting")
         startDurationTimer()
 
         val preferBack = !_isFrontCamera.value
@@ -487,9 +538,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             preferBackCamera = preferBack,
             enableAudio = enableAudio
         ) { sdpOffer ->
-            Log.d(TAG, "Resumed Broadcast Offer created for channel '$channelId' (session=$currentSessionId)")
             signalingClient.startBroadcast(
-                channelId = channelId,
+                deviceId = myDeviceId,
                 sdpOffer = sdpOffer.description,
                 sessionId = currentSessionId,
                 isFrontCamera = _isFrontCamera.value,
@@ -503,8 +553,26 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun handleRemoteCommand(command: RemoteCommand) {
+        Log.d(TAG, "Executing remote command: ${command.action} (mode=${_surveillanceMode.value})")
+
+        // Zero-manual-start wake: if a Viewer taps this device while on Home or Device List!
+        if (command.action == RemoteCommandAction.START_BROADCAST && _surveillanceMode.value != SurveillanceMode.BROADCAST) {
+            if (_surveillanceMode.value == SurveillanceMode.VIEW) {
+                // Stop viewing first if this device was viewing someone else
+                stopSession(returnToDeviceList = false)
+            }
+            val app = getApplication<Application>()
+            val hasCamera = ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            val hasAudio = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            if (hasCamera) {
+                startBroadcast(enableAudio = hasAudio, fromRemote = true)
+            } else {
+                _pendingRemoteBroadcastWake.value = true
+            }
+            return
+        }
+
         if (_surveillanceMode.value != SurveillanceMode.BROADCAST) return
-        Log.d(TAG, "Executing remote command on Broadcaster: ${command.action} (value=${command.value})")
 
         when (command.action) {
             RemoteCommandAction.SWITCH_CAMERA -> {
@@ -562,17 +630,13 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * When a viewer disconnects cleanly while Broadcaster is live, keep camera running
-     * and publish a fresh SDP Offer so the next viewer can connect immediately.
-     */
     private fun resetBroadcasterForNextViewer() {
-        val channelId = _currentRoomId.value ?: return
+        val label = _deviceName.value
         val rtc = webRtcClient ?: return
         if (_surveillanceMode.value != SurveillanceMode.BROADCAST) return
         if (_callState.value is CallState.Standby) return
 
-        Log.d(TAG, "Viewer left channel '$channelId'. Refreshing broadcast offer for next viewer...")
+        Log.d(TAG, "Viewer left. Refreshing broadcast offer for next viewer...")
         reconnectJob?.cancel()
         disconnectDebounceJob?.cancel()
         stopStatsPolling()
@@ -582,11 +646,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         reconnectAttempts = 0
         hasReconnectedOnce = false
         currentSessionId = UUID.randomUUID().toString().take(8)
-        _callState.value = CallState.WaitingForPeer(channelId)
+        _callState.value = CallState.WaitingForPeer(label)
+        signalingClient.updateDevicePresence(status = "broadcasting")
 
         rtc.rebuildPeerConnection(SurveillanceRole.BROADCASTER) { sdpOffer ->
             signalingClient.startBroadcast(
-                channelId = channelId,
+                deviceId = myDeviceId,
                 sdpOffer = sdpOffer.description,
                 sessionId = currentSessionId,
                 isFrontCamera = _isFrontCamera.value,
@@ -597,6 +662,10 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun handleSignalingEvent(event: SignalingEvent) {
         when (event) {
+            is SignalingEvent.OnlineDevicesUpdated -> {
+                val others = event.devices.filter { it.deviceId != myDeviceId }
+                _onlineDevices.value = others
+            }
             is SignalingEvent.RemoteCommandReceived -> {
                 handleRemoteCommand(event.command)
             }
@@ -612,20 +681,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     reconnectJob?.cancel()
                     disconnectDebounceJob?.cancel()
                     lastViewerSessionId = ""
-                    val channelId = _currentRoomId.value ?: DEFAULT_CHANNEL_ID
-                    _callState.value = CallState.Standby(channelId)
+                    _callState.value = CallState.Standby(_targetDeviceName.value)
                     webRtcClient?.rebuildPeerConnection(SurveillanceRole.VIEWER)
                 }
             }
             is SignalingEvent.OfferReceived -> {
                 if (_surveillanceMode.value == SurveillanceMode.VIEW) {
+                    viewerAutoWakeJob?.cancel()
                     val rtc = webRtcClient ?: return
                     val isNewBroadcastSession = lastViewerSessionId.isNotBlank() &&
                         event.sessionId.isNotBlank() &&
                         event.sessionId != lastViewerSessionId
 
                     if (isNewBroadcastSession) {
-                        Log.d(TAG, "New broadcaster session detected (${event.sessionId}); rebuilding viewer PeerConnection")
                         localCandidates = 0
                         remoteCandidates = 0
                         rtc.rebuildPeerConnection(SurveillanceRole.VIEWER)
@@ -634,7 +702,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     _isRemoteBroadcastActive.value = true
 
                     if (_callState.value is CallState.Standby) {
-                        _callState.value = CallState.JoiningCall(_currentRoomId.value ?: DEFAULT_CHANNEL_ID)
+                        _callState.value = CallState.JoiningCall(_targetDeviceName.value)
                     }
 
                     rtc.setRemoteDescription(event.sdp, SessionDescription.Type.OFFER) {
@@ -646,9 +714,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             }
             is SignalingEvent.AnswerReceived -> {
                 if (_surveillanceMode.value == SurveillanceMode.BROADCAST && _callState.value !is CallState.Standby) {
-                    val rtc = webRtcClient ?: return
-                    rtc.setRemoteDescription(event.sdp, SessionDescription.Type.ANSWER) {
-                        Log.d(TAG, "Viewer Answer applied successfully on Broadcaster")
+                    webRtcClient?.setRemoteDescription(event.sdp, SessionDescription.Type.ANSWER) {
+                        Log.d(TAG, "Viewer Answer applied successfully")
                     }
                 }
             }
@@ -679,13 +746,8 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     stopStatsPolling()
                     reconnectJob?.cancel()
                     lastViewerSessionId = ""
-                    val channelId = _currentRoomId.value
-                    if (channelId != null) {
-                        _callState.value = CallState.JoiningCall(channelId)
-                        webRtcClient?.rebuildPeerConnection(SurveillanceRole.VIEWER)
-                    } else {
-                        _callState.value = CallState.Ended(event.reason)
-                    }
+                    _callState.value = CallState.Standby(_targetDeviceName.value)
+                    webRtcClient?.rebuildPeerConnection(SurveillanceRole.VIEWER)
                 }
             }
             is SignalingEvent.PeerMediaStateChanged -> {
@@ -695,7 +757,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 _isRemoteBroadcastActive.value = event.broadcastActive
             }
             is SignalingEvent.ReconnectRequested -> {
-                val channelId = _currentRoomId.value ?: return
+                val label = _targetDeviceName.value
                 if (_surveillanceMode.value == SurveillanceMode.VIEW && _callState.value !is CallState.Standby) {
                     reconnectAttempts++
                     val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
@@ -705,7 +767,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                         if (!hasReconnectedOnce) {
                             hasReconnectedOnce = true
                             _callState.value = CallState.Reconnecting(
-                                channelId = channelId,
+                                deviceName = label,
                                 attempt = reconnectAttempts,
                                 reason = "Camera initiated full reconnect",
                                 maxAttempts = 30
@@ -722,6 +784,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun handleWebRtcEvent(event: WebRtcEvent) {
         if (_callState.value is CallState.Standby) return
+
+        val displayLabel = if (_surveillanceMode.value == SurveillanceMode.BROADCAST) {
+            _deviceName.value
+        } else {
+            _targetDeviceName.value
+        }
 
         when (event) {
             is WebRtcEvent.IceCandidateGenerated -> {
@@ -741,13 +809,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
                         disconnectDebounceJob?.cancel()
-                        val channelId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
                         reconnectAttempts = 0
                         hasReconnectedOnce = false
                         _isRemoteBroadcastActive.value = true
                         if (_callState.value !is CallState.Connected) {
-                            _callState.value = CallState.Connected(channelId, _callDurationSeconds.value)
+                            _callState.value = CallState.Connected(displayLabel, _callDurationSeconds.value)
                         }
                         startDurationTimer()
                         startStatsPolling()
@@ -779,13 +846,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 when (event.state) {
                     PeerConnection.PeerConnectionState.CONNECTED -> {
                         disconnectDebounceJob?.cancel()
-                        val channelId = _currentRoomId.value ?: ""
                         reconnectJob?.cancel()
                         reconnectAttempts = 0
                         hasReconnectedOnce = false
                         _isRemoteBroadcastActive.value = true
                         if (_callState.value !is CallState.Connected) {
-                            _callState.value = CallState.Connected(channelId, _callDurationSeconds.value)
+                            _callState.value = CallState.Connected(displayLabel, _callDurationSeconds.value)
                         }
                         startDurationTimer()
                         startStatsPolling()
@@ -816,9 +882,14 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerReconnection(reason: String) {
-        val channelId = _currentRoomId.value ?: return
+        if (_currentRoomId.value == null) return
         if (_callState.value is CallState.Standby) return
 
+        val displayLabel = if (_surveillanceMode.value == SurveillanceMode.BROADCAST) {
+            _deviceName.value
+        } else {
+            _targetDeviceName.value
+        }
         val role = if (_surveillanceMode.value == SurveillanceMode.BROADCAST) {
             SurveillanceRole.BROADCASTER
         } else {
@@ -829,13 +900,12 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         val mode = if (reconnectAttempts <= 3) ReconnectMode.RESUME else ReconnectMode.FULL_RECONNECT
         updateStats()
 
-        // Fast resume is silent to the UI; Full Reconnect escalates once via hasReconnectedOnce gate.
         if (mode == ReconnectMode.FULL_RECONNECT) {
             _remoteVideoTrack.value = null
             if (!hasReconnectedOnce) {
                 hasReconnectedOnce = true
                 _callState.value = CallState.Reconnecting(
-                    channelId = channelId,
+                    deviceName = displayLabel,
                     attempt = reconnectAttempts,
                     reason = reason,
                     maxAttempts = 30
@@ -862,7 +932,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 if (role == SurveillanceRole.BROADCASTER) {
                     resetBroadcasterForNextViewer()
                 } else {
-                    _callState.value = CallState.Error("Connection lost after 30 attempts. Tap View to reconnect.")
+                    _callState.value = CallState.Error("Connection lost after 30 attempts. Tap a device to reconnect.")
                 }
                 return@launch
             }
@@ -873,7 +943,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
 
             when (mode) {
                 ReconnectMode.RESUME -> {
-                    Log.d(TAG, "Triggering Fast Resume (silent ICE restart)")
                     if (role == SurveillanceRole.BROADCASTER) {
                         webRtcClient?.restartIce(isBroadcaster = true) { sdpOffer ->
                             signalingClient.sendReconnectOffer(sdpOffer.description, currentSessionId)
@@ -883,7 +952,6 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 ReconnectMode.FULL_RECONNECT -> {
-                    Log.d(TAG, "Triggering Full Reconnect (rebuilding PeerConnection)")
                     localCandidates = 0
                     remoteCandidates = 0
                     webRtcClient?.rebuildPeerConnection(role = role) { sdpOffer ->
@@ -905,18 +973,19 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 } else if (role == SurveillanceRole.BROADCASTER) {
                     resetBroadcasterForNextViewer()
                 } else {
-                    _callState.value = CallState.Error("Connection lost after 30 attempts. Tap View to reconnect.")
+                    _callState.value = CallState.Error("Connection lost after 30 attempts. Tap a device to reconnect.")
                 }
             }
         }
     }
 
     fun forceReconnect() {
-        val channelId = _currentRoomId.value ?: return
+        val targetId = _currentRoomId.value ?: return
         if (_surveillanceMode.value == SurveillanceMode.VIEW &&
             (_callState.value is CallState.JoiningCall || _callState.value is CallState.Standby)
         ) {
-            signalingClient.joinAsViewer(channelId)
+            signalingClient.joinAsViewer(targetId)
+            signalingClient.sendRemoteCommand(RemoteCommandAction.START_BROADCAST, targetDeviceId = targetId)
         } else {
             triggerReconnection("Manual Reconnect")
         }
@@ -932,9 +1001,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
                 val min = totalSec / 60
                 val sec = totalSec % 60
                 val durationText = String.format(Locale.US, "%02d:%02d", min, sec)
-                val channelId = _currentRoomId.value ?: ""
                 val isBroadcaster = _surveillanceMode.value == SurveillanceMode.BROADCAST
-                CallForegroundService.updateService(getApplication(), isBroadcaster, channelId, durationText)
+                val label = if (isBroadcaster) _deviceName.value else _targetDeviceName.value
+                CallForegroundService.updateService(getApplication(), isBroadcaster, label, durationText)
             }
         }
     }
@@ -1008,7 +1077,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // Broadcaster Local Controls (synced back to Viewer via callerMedia)
+    // Broadcaster Local Controls
     fun toggleMicrophone() {
         webRtcClient?.let {
             val enabled = it.toggleMicrophone()
@@ -1069,13 +1138,9 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
             true
         } else {
             val track = _remoteVideoTrack.value
-            val channel = _currentRoomId.value
-            rec.startRecording(track, channel, webRtcClient)
+            val safeName = _targetDeviceName.value.replace(Regex("[^a-zA-Z0-9_-]"), "_").ifBlank { "Device" }
+            rec.startRecording(track, safeName, webRtcClient)
         }
-    }
-
-    fun stopRemoteRecording() {
-        remoteRecorder?.stopRecording()
     }
 
     fun dismissRecordingStatus() {
@@ -1090,55 +1155,60 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         return remoteRecorder?.createViewIntent(file, mediaUri)
     }
 
-    fun stopSession() {
+    fun stopSession(returnToDeviceList: Boolean = false) {
         CallForegroundService.stopService(getApplication())
 
         if (remoteRecorder?.isRecording == true) {
             remoteRecorder?.stopRecording()
         }
 
+        val wasMode = _surveillanceMode.value
         val currentState = _callState.value
-        when (_surveillanceMode.value) {
+        when (wasMode) {
             SurveillanceMode.BROADCAST -> signalingClient.stopBroadcast()
             SurveillanceMode.VIEW -> {
-                // If camera is in Remote Standby, don't overwrite "standby" with "viewer_left"
                 if (currentState is CallState.Standby) {
                     signalingClient.cleanup()
                 } else {
                     signalingClient.leaveAsViewer()
                 }
             }
-            SurveillanceMode.NONE -> signalingClient.cleanup()
+            else -> signalingClient.cleanup()
         }
 
         stopDurationTimer()
         stopStatsPolling()
         reconnectJob?.cancel()
         disconnectDebounceJob?.cancel()
+        viewerAutoWakeJob?.cancel()
         bannerClearJob?.cancel()
         cancelWebRtcObservers()
 
         webRtcClient?.close()
         webRtcClient = null
 
-        if (_surveillanceMode.value == SurveillanceMode.VIEW) {
+        if (wasMode == SurveillanceMode.VIEW) {
             audioManager.stop()
         }
 
         hasReconnectedOnce = false
         _isStealthMode.value = false
         _remoteCommandBanner.value = null
-        _surveillanceMode.value = SurveillanceMode.NONE
         _callState.value = CallState.Idle
         _currentRoomId.value = null
         _callDurationSeconds.value = 0L
         _localVideoTrack.value = null
         _remoteVideoTrack.value = null
         _liveStats.value = WebRtcLiveStats()
-    }
 
-    fun endCall() {
-        stopSession()
+        if (returnToDeviceList && wasMode == SurveillanceMode.VIEW) {
+            _surveillanceMode.value = SurveillanceMode.DEVICE_LIST
+            signalingClient.updateDevicePresence(status = "ready")
+            signalingClient.startObservingOnlineDevices()
+        } else {
+            _surveillanceMode.value = SurveillanceMode.NONE
+            signalingClient.updateDevicePresence(status = "ready")
+        }
     }
 
     fun resetToIdle() {
@@ -1150,20 +1220,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         _remoteVideoTrack.value = null
         _isStealthMode.value = false
         _remoteCommandBanner.value = null
-    }
-
-    private fun loadRecentChannels(): List<String> {
-        val raw = prefs.getString(KEY_RECENT_CHANNELS, "") ?: ""
-        return if (raw.isBlank()) listOf(DEFAULT_CHANNEL_ID) else raw.split(",").filter { it.isNotBlank() }
-    }
-
-    private fun saveRecentChannel(channelId: String) {
-        val current = loadRecentChannels().toMutableList()
-        current.remove(channelId)
-        current.add(0, channelId)
-        val trimmed = current.take(5)
-        prefs.edit().putString(KEY_RECENT_CHANNELS, trimmed.joinToString(",")).apply()
-        _recentChannels.value = trimmed
+        signalingClient.updateDevicePresence(status = "ready")
     }
 
     override fun onCleared() {
@@ -1171,6 +1228,7 @@ class CallViewModel(application: Application) : AndroidViewModel(application) {
         if (activeInstance == this) {
             activeInstance = null
         }
-        stopSession()
+        stopSession(returnToDeviceList = false)
+        signalingClient.markDeviceOffline()
     }
 }

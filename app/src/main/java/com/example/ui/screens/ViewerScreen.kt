@@ -114,7 +114,8 @@ fun ViewerScreen(
     val context = LocalContext.current
 
     val callState by viewModel.callState.collectAsState()
-    val channelId by viewModel.currentRoomId.collectAsState()
+    val targetDeviceName by viewModel.targetDeviceName.collectAsState()
+    val displayDeviceName = targetDeviceName.ifBlank { "Remote Camera" }
     val durationSeconds by viewModel.callDurationSeconds.collectAsState()
     val remoteVideoTrack by viewModel.remoteVideoTrack.collectAsState()
     val isRemoteCameraEnabled by viewModel.isRemoteCameraEnabled.collectAsState()
@@ -160,7 +161,7 @@ fun ViewerScreen(
                 when {
                     isCameraInStandby -> {
                         CameraStandbyOverlay(
-                            channelId = channelId ?: CallViewModel.DEFAULT_CHANNEL_ID,
+                            deviceName = displayDeviceName,
                             onStartBroadcastRemotely = { viewModel.remoteStartBroadcast() }
                         )
                     }
@@ -197,7 +198,7 @@ fun ViewerScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "The broadcaster temporarily paused video on '${channelId ?: ""}'",
+                                text = "The broadcaster temporarily paused video on '$displayDeviceName'",
                                 color = SlateTextSecondary,
                                 fontSize = 13.sp,
                                 textAlign = TextAlign.Center
@@ -206,7 +207,7 @@ fun ViewerScreen(
                     }
                     else -> {
                         WaitingForCameraOverlay(
-                            channelId = channelId ?: CallViewModel.DEFAULT_CHANNEL_ID,
+                            deviceName = displayDeviceName,
                             onRetry = { viewModel.forceReconnect() }
                         )
                     }
@@ -334,12 +335,16 @@ fun ViewerScreen(
                         border = BorderStroke(1.dp, GlassDarkBorder)
                     ) {
                         Text(
-                            text = "CH: ${channelId ?: "--"} • ${formatCallDuration(durationSeconds)}",
+                            text = "$displayDeviceName • ${formatCallDuration(durationSeconds)}",
                             color = SlateTextPrimary,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .widthIn(max = 220.dp)
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
                         )
                     }
                 }
@@ -721,7 +726,7 @@ private fun RemoteControlChip(
 
 @Composable
 private fun CameraStandbyOverlay(
-    channelId: String,
+    deviceName: String,
     onStartBroadcastRemotely: () -> Unit
 ) {
     Column(
@@ -757,7 +762,7 @@ private fun CameraStandbyOverlay(
                 textAlign = TextAlign.Center
             )
             Text(
-                text = "Camera & mic are turned off on '$channelId'.\nTap below to remotely start broadcasting again.",
+                text = "Camera & mic are turned off on '$deviceName'.\nTap below to remotely start broadcasting again.",
                 color = SlateTextSecondary,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
@@ -869,7 +874,7 @@ private fun RecordActionButton(
 
 @Composable
 private fun WaitingForCameraOverlay(
-    channelId: String,
+    deviceName: String,
     onRetry: () -> Unit
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "radar")
@@ -906,7 +911,7 @@ private fun WaitingForCameraOverlay(
             ) {
                 Icon(
                     imageVector = Icons.Default.Sensors,
-                    contentDescription = "Searching for Camera",
+                    contentDescription = "Starting Remote Camera",
                     tint = CyanGlow,
                     modifier = Modifier.size(34.dp)
                 )
@@ -918,13 +923,14 @@ private fun WaitingForCameraOverlay(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                text = "Waiting for Camera...",
+                text = "Starting '$deviceName'...",
                 color = SlateTextPrimary,
                 fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
             )
             Text(
-                text = "Listening on channel '$channelId'.\nTap Broadcast on your camera device — live feed will start automatically.",
+                text = "Sending remote start signal to '$deviceName'.\nLive video will begin automatically once the camera wakes up.",
                 color = SlateTextSecondary,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
@@ -942,7 +948,7 @@ private fun WaitingForCameraOverlay(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = null, tint = CyanGlow, modifier = Modifier.size(16.dp))
-                Text("Refresh Channel", color = CyanGlow, fontWeight = FontWeight.SemiBold)
+                Text("Retry Connection", color = CyanGlow, fontWeight = FontWeight.SemiBold)
             }
         }
     }

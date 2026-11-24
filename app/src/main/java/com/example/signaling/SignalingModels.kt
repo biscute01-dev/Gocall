@@ -17,21 +17,20 @@ data class IceCandidateModel(
 )
 
 @Keep
-data class RoomData(
-    val caller: SessionDescriptionModel? = null,
-    val callee: SessionDescriptionModel? = null,
-    val callerCandidates: Map<String, IceCandidateModel>? = null,
-    val calleeCandidates: Map<String, IceCandidateModel>? = null,
-    val status: String = "open",
-    val createdAt: Long = System.currentTimeMillis()
-)
-
-@Keep
 data class MediaStateModel(
     val cameraEnabled: Boolean = true,
     val micEnabled: Boolean = true,
     val isFrontCamera: Boolean = false,
     val broadcastActive: Boolean = true
+)
+
+@Keep
+data class OnlineDevice(
+    val deviceId: String = "",
+    val deviceName: String = "",
+    val online: Boolean = false,
+    val status: String = "ready", // "ready", "broadcasting", "standby", "viewing", "offline"
+    val lastSeen: Long = 0L
 )
 
 enum class RemoteCommandAction {
@@ -63,6 +62,7 @@ sealed class SignalingEvent {
         val broadcastActive: Boolean = true
     ) : SignalingEvent()
     data class RemoteCommandReceived(val command: RemoteCommand) : SignalingEvent()
+    data class OnlineDevicesUpdated(val devices: List<OnlineDevice>) : SignalingEvent()
     object BroadcastStandby : SignalingEvent()
     data class Error(val message: String) : SignalingEvent()
 }

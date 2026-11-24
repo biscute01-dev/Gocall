@@ -1,5 +1,6 @@
 package com.example
 
+import android.Manifest
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -13,10 +14,13 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -39,10 +43,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.ui.screens.BroadcastScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.OnlineDevicesScreen
 import com.example.ui.screens.ViewerScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.RoseDestructive
@@ -107,7 +113,9 @@ class MainActivity : ComponentActivity() {
                 callViewModel.isRemoteAudioMuted,
                 callViewModel.audioManager.isSpeakerOn
             ) { mode, _, _ ->
-                if (mode != SurveillanceMode.NONE) {
+                val isStreamingSession =
+                    mode == SurveillanceMode.BROADCAST || mode == SurveillanceMode.VIEW
+                if (isStreamingSession) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -249,12 +257,44 @@ fun SurveillanceApp(
     viewModel: CallViewModel,
     onEnterPip: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val surveillanceMode by viewModel.surveillanceMode.collectAsState()
     val callState by viewModel.callState.collectAsState()
     val isInPipMode by viewModel.isInPipMode.collectAsState()
+    val pendingRemoteWake by viewModel.pendingRemoteBroadcastWake.collectAsState()
 
     var showStopConfirmDialog by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val remoteWakePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val cameraGranted = results[Manifest.permission.CAMERA] == true
+        val audioGranted = results[Manifest.permission.RECORD_AUDIO] == true
+        viewModel.clearPendingRemoteBroadcastWake()
+        if (cameraGranted) {
+            viewModel.startBroadcast(enableAudio = audioGranted, fromRemote = true)
+        } else {
+            Toast.makeText(
+                context,
+                "Camera permission is required for remote broadcast start",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    LaunchedEffect(pendingRemoteWake) {
+        if (pendingRemoteWake) {
+            val permissions = mutableListOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            remoteWakePermissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
 
     LaunchedEffect(callState) {
         when (val state = callState) {
@@ -264,13 +304,19 @@ fun SurveillanceApp(
         }
     }
 
-    val isSessionActive = surveillanceMode != SurveillanceMode.NONE
+    val isSubScreenActive = surveillanceMode != SurveillanceMode.NONE
 
-    BackHandler(enabled = isSessionActive) {
-        if (viewModel.isStealthMode.value) {
-            viewModel.toggleStealthMode(false)
-        } else {
-            showStopConfirmDialog = true
+    BackHandler(enabled = isSubScreenActive) {
+        when {
+            surveillanceMode == SurveillanceMode.DEVICE_LIST -> {
+                viewModel.closeDeviceList()
+            }
+            viewModel.isStealthMode.value -> {
+                viewModel.toggleStealthMode(false)
+            }
+            else -> {
+                showStopConfirmDialog = true
+            }
         }
     }
 
@@ -283,11 +329,22 @@ fun SurveillanceApp(
             SurveillanceMode.NONE -> {
                 HomeScreen(
                     viewModel = viewModel,
-                    onStartBroadcast = { channelId, enableAudio ->
-                        viewModel.startBroadcast(channelId, enableAudio)
+                    onStartBroadcast = { enableAudio ->
+                        viewModel.startBroadcast(enableAudio = enableAudio)
                     },
-                    onStartView = { channelId ->
-                        viewModel.startViewing(channelId)
+                    onOpenViewDevices = {
+                        viewModel.openDeviceList()
+                    }
+                )
+            }
+            SurveillanceMode.DEVICE_LIST -> {
+                OnlineDevicesScreen(
+                    viewModel = viewModel,
+                    onSelectDevice = { device ->
+                        viewModel.connectToOnlineDevice(device)
+                    },
+                    onBack = {
+                        viewModel.closeDeviceList()
                     }
                 )
             }
@@ -300,7 +357,7 @@ fun SurveillanceApp(
             SurveillanceMode.VIEW -> {
                 ViewerScreen(
                     viewModel = viewModel,
-                    onStopViewing = { viewModel.stopSession() },
+                    onStopViewing = { viewModel.stopSession(returnToDeviceList = true) },
                     onEnterPip = onEnterPip
                 )
             }
@@ -325,7 +382,7 @@ fun SurveillanceApp(
                 Button(
                     onClick = {
                         showStopConfirmDialog = false
-                        viewModel.stopSession()
+                        viewModel.stopSession(returnToDeviceList = !isBroadcast)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = RoseDestructive)
                 ) {

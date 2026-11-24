@@ -10,7 +10,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,19 +24,18 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Casino
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
@@ -47,6 +45,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -67,11 +66,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,18 +95,22 @@ import com.example.viewmodel.CallViewModel
 @Composable
 fun HomeScreen(
     viewModel: CallViewModel,
-    onStartBroadcast: (channelId: String, enableAudio: Boolean) -> Unit,
-    onStartView: (channelId: String) -> Unit
+    onStartBroadcast: (enableAudio: Boolean) -> Unit,
+    onOpenViewDevices: () -> Unit
 ) {
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
 
-    val activeChannel by viewModel.activeChannelId.collectAsState()
-    val recentChannels by viewModel.recentChannels.collectAsState()
+    val deviceName by viewModel.deviceName.collectAsState()
+    val onlineDevices by viewModel.onlineDevices.collectAsState()
     val customDbUrl by viewModel.customDatabaseUrl.collectAsState()
 
-    var channelInput by remember(activeChannel) { mutableStateOf(activeChannel) }
+    var showRenameDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var hasCameraPerm by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     val broadcastPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -120,42 +120,44 @@ fun HomeScreen(
         val audioGranted = results[Manifest.permission.RECORD_AUDIO] == true ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
+        hasCameraPerm = cameraGranted
         if (cameraGranted) {
-            val targetChannel = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
-            onStartBroadcast(targetChannel, audioGranted)
+            onStartBroadcast(audioGranted)
         } else {
-            Toast.makeText(
-                context,
-                "Camera permission is required to Broadcast.",
-                Toast.LENGTH_LONG
-            ).show()
+            Toast.makeText(context, "Camera permission is required to Broadcast.", Toast.LENGTH_LONG).show()
         }
     }
 
+    val armPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val cameraGranted = results[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        hasCameraPerm = cameraGranted
+        if (cameraGranted) {
+            Toast.makeText(context, "Remote camera start enabled for this device", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun requestPermissionsList(): Array<String> {
+        val list = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        return list.toTypedArray()
+    }
+
     fun launchBroadcastOneTap() {
-        val targetChannel = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
         val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val needsNotif = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
 
         if (hasCamera && hasAudio && !needsNotif) {
-            onStartBroadcast(targetChannel, true)
+            onStartBroadcast(true)
         } else {
-            val toRequest = mutableListOf(
-                Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO
-            )
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                toRequest.add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-            broadcastPermissionLauncher.launch(toRequest.toTypedArray())
+            broadcastPermissionLauncher.launch(requestPermissionsList())
         }
-    }
-
-    fun launchViewOneTap() {
-        val targetChannel = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
-        onStartView(targetChannel)
     }
 
     Box(
@@ -163,7 +165,6 @@ fun HomeScreen(
             .fillMaxSize()
             .background(SlateDark950)
             .drawBehind {
-                // Subtle dual tactical ambient glows
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(RoseDestructive.copy(alpha = 0.14f), Color.Transparent),
@@ -189,7 +190,7 @@ fun HomeScreen(
                 .align(Alignment.TopCenter)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             // 1. Tactical Brand Header
             Row(
@@ -241,9 +242,9 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     StatusPill(
-                        text = "NO LOGIN",
+                        text = "ONLINE",
                         stateColor = EmeraldGlow,
-                        isPulsing = false
+                        isPulsing = true
                     )
                     IconButton(
                         onClick = { showSettingsDialog = true },
@@ -264,7 +265,7 @@ fun HomeScreen(
                 }
             }
 
-            // 2. Active Camera Channel Card (Pre-filled for zero-typing 1-tap pairing)
+            // 2. This Device Name Identity Card (Replaces Room Codes completely)
             Card(
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(containerColor = GlassDarkCard),
@@ -277,149 +278,102 @@ fun HomeScreen(
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(CyanAccent.copy(alpha = 0.16f))
+                                .border(1.dp, CyanGlow.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Smartphone,
+                                contentDescription = "This Device",
+                                tint = CyanGlow,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "THIS DEVICE NAME",
+                                color = SlateTextSecondary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                            Text(
+                                text = deviceName,
+                                color = SlateTextPrimary,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { showRenameDialog = true },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(SlateDark800)
+                                .border(1.dp, SlateDark700, RoundedCornerShape(12.dp))
+                                .testTag("rename_device_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Rename Device",
+                                tint = CyanGlow,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    // Remote Auto-Start Readiness Row
+                    if (hasCameraPerm) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Sensors,
+                                imageVector = Icons.Default.CheckCircle,
                                 contentDescription = null,
-                                tint = CyanGlow,
-                                modifier = Modifier.size(18.dp)
+                                tint = EmeraldGlow,
+                                modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "CAMERA CHANNEL CODE",
-                                color = SlateTextSecondary,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp
+                                text = "Ready for instant remote broadcast when tapped from another phone",
+                                color = EmeraldGlow,
+                                fontSize = 11.sp
                             )
                         }
-                        Text(
-                            text = "Use same code on both devices",
-                            color = SlateTextMuted,
-                            fontSize = 11.sp
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = channelInput,
-                            onValueChange = { next ->
-                                channelInput = next
-                                viewModel.setActiveChannelId(next)
-                            },
-                            singleLine = true,
-                            placeholder = { Text("cam-01", color = SlateTextMuted) },
-                            textStyle = androidx.compose.ui.text.TextStyle(
-                                color = SlateTextPrimary,
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            ),
-                            shape = RoundedCornerShape(14.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = CyanGlow,
-                                unfocusedBorderColor = SlateDark700,
-                                focusedContainerColor = SlateDark900,
-                                unfocusedContainerColor = SlateDark900,
-                                cursorColor = CyanGlow
-                            ),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("channel_code_input")
-                        )
-
-                        IconButton(
-                            onClick = {
-                                val code = channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }
-                                clipboardManager.setText(AnnotatedString(code))
-                                Toast.makeText(context, "Copied '$code'", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(SlateDark800)
-                                .border(1.dp, SlateDark700, RoundedCornerShape(14.dp))
-                                .testTag("copy_channel_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "Copy Channel Code",
-                                tint = SlateTextPrimary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                val newCode = viewModel.generateRandomChannelId()
-                                channelInput = newCode
-                            },
-                            modifier = Modifier
-                                .size(52.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(SlateDark800)
-                                .border(1.dp, SlateDark700, RoundedCornerShape(14.dp))
-                                .testTag("random_channel_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Casino,
-                                contentDescription = "Generate Private Code",
-                                tint = CyanGlow,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-
-                    if (recentChannels.isNotEmpty()) {
-                        Row(
+                    } else {
+                        OutlinedButton(
+                            onClick = { armPermissionLauncher.launch(requestPermissionsList()) },
+                            border = BorderStroke(1.dp, AmberWarning.copy(alpha = 0.55f)),
+                            shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                .testTag("enable_remote_camera_button")
                         ) {
-                            recentChannels.forEach { recent ->
-                                val isSelected = recent.equals(channelInput.trim(), ignoreCase = true)
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected) CyanAccent.copy(alpha = 0.2f) else SlateDark900,
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (isSelected) CyanGlow.copy(alpha = 0.6f) else SlateDark700
-                                    ),
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .clickable {
-                                            channelInput = recent
-                                            viewModel.setActiveChannelId(recent)
-                                        }
-                                ) {
-                                    Text(
-                                        text = "#$recent",
-                                        color = if (isSelected) CyanGlow else SlateTextSecondary,
-                                        fontSize = 12.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                                    )
-                                }
-                            }
+                            Text(
+                                text = "Allow Camera & Mic for Auto Remote Start",
+                                color = AmberWarning,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
             }
 
-            // 3. Single-Tap Mode Selector Section
+            // 3. Single-Tap Mode Selector
             Text(
-                text = "SELECT DEVICE MODE",
+                text = "SELECT MODE",
                 color = SlateTextSecondary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -429,6 +383,13 @@ fun HomeScreen(
 
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                 val isWide = maxWidth >= 520.dp
+                val viewBadge = if (onlineDevices.isNotEmpty()) "${onlineDevices.size} ONLINE" else "MONITOR UNIT"
+                val viewAction = if (onlineDevices.isNotEmpty()) {
+                    "VIEW ONLINE DEVICES (${onlineDevices.size})"
+                } else {
+                    "OPEN ONLINE DEVICES"
+                }
+
                 if (isWide) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -437,8 +398,8 @@ fun HomeScreen(
                         SurveillanceModeCard(
                             title = "Broadcast",
                             badge = "CAMERA UNIT",
-                            subtitle = "Stream this device's rear camera & audio live to a viewer",
-                            highlights = listOf("Rear Cam Default", "Stealth Blackout", "Auto-Ready"),
+                            subtitle = "Start streaming this device's camera immediately with stealth blackout",
+                            highlights = listOf("Rear Cam Default", "Stealth Blackout", "Remote Controlled"),
                             actionLabel = "TAP TO BROADCAST",
                             accentColor = RoseDestructive,
                             accentGlow = RoseGlow,
@@ -449,15 +410,15 @@ fun HomeScreen(
                         )
                         SurveillanceModeCard(
                             title = "View",
-                            badge = "MONITOR UNIT",
-                            subtitle = "Watch the live camera stream & record HD MP4 clips",
-                            highlights = listOf("HD Record", "No Camera Needed", "Live PiP"),
-                            actionLabel = "TAP TO VIEW LIVE",
+                            badge = viewBadge,
+                            subtitle = "Pick any online device to auto-start its camera, watch live & record HD",
+                            highlights = listOf("Auto-Start Cam", "Full Remote Control", "HD Record"),
+                            actionLabel = viewAction,
                             accentColor = CyanAccent,
                             accentGlow = CyanGlow,
                             icon = Icons.Default.Visibility,
                             testTag = "view_mode_button",
-                            onClick = { launchViewOneTap() },
+                            onClick = onOpenViewDevices,
                             modifier = Modifier.weight(1f)
                         )
                     }
@@ -467,10 +428,23 @@ fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         SurveillanceModeCard(
+                            title = "View",
+                            badge = viewBadge,
+                            subtitle = "Pick any online device to auto-start its camera, watch live & record HD",
+                            highlights = listOf("Auto-Start Cam", "Full Remote Control", "HD Record"),
+                            actionLabel = viewAction,
+                            accentColor = CyanAccent,
+                            accentGlow = CyanGlow,
+                            icon = Icons.Default.Visibility,
+                            testTag = "view_mode_button",
+                            onClick = onOpenViewDevices,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        SurveillanceModeCard(
                             title = "Broadcast",
                             badge = "CAMERA UNIT",
-                            subtitle = "Stream this device's rear camera & audio live to a viewer",
-                            highlights = listOf("Rear Cam Default", "Stealth Blackout", "Auto-Ready"),
+                            subtitle = "Start streaming this device's camera immediately with stealth blackout",
+                            highlights = listOf("Rear Cam Default", "Stealth Blackout", "Remote Controlled"),
                             actionLabel = "TAP TO BROADCAST",
                             accentColor = RoseDestructive,
                             accentGlow = RoseGlow,
@@ -479,24 +453,11 @@ fun HomeScreen(
                             onClick = { launchBroadcastOneTap() },
                             modifier = Modifier.fillMaxWidth()
                         )
-                        SurveillanceModeCard(
-                            title = "View",
-                            badge = "MONITOR UNIT",
-                            subtitle = "Watch the live camera stream & record HD MP4 clips",
-                            highlights = listOf("HD Record", "No Camera Needed", "Live PiP"),
-                            actionLabel = "TAP TO VIEW LIVE",
-                            accentColor = CyanAccent,
-                            accentGlow = CyanGlow,
-                            icon = Icons.Default.Visibility,
-                            testTag = "view_mode_button",
-                            onClick = { launchViewOneTap() },
-                            modifier = Modifier.fillMaxWidth()
-                        )
                     }
                 }
             }
 
-            // 4. Compact 2-Step Quick Guide
+            // 4. Compact Tip Card
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = SlateDark900.copy(alpha = 0.7f)),
@@ -515,7 +476,7 @@ fun HomeScreen(
                         modifier = Modifier.size(12.dp)
                     )
                     Text(
-                        text = "Phone 1 taps Broadcast. Phone 2 taps View on the same channel code ('${channelInput.trim().ifBlank { CallViewModel.DEFAULT_CHANNEL_ID }}'). Order doesn't matter — both auto-connect.",
+                        text = "No room codes needed. Open CamGuard on any phone, then tap View here and pick its name — the camera starts remotely.",
                         color = SlateTextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 17.sp
@@ -525,6 +486,18 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
         }
+    }
+
+    if (showRenameDialog) {
+        RenameDeviceDialog(
+            currentName = deviceName,
+            onDismiss = { showRenameDialog = false },
+            onSave = { newName ->
+                viewModel.setDeviceName(newName)
+                showRenameDialog = false
+                Toast.makeText(context, "Device renamed to '${newName.trim()}'", Toast.LENGTH_SHORT).show()
+            }
+        )
     }
 
     if (showSettingsDialog) {
@@ -581,9 +554,7 @@ private fun SurveillanceModeCard(
                 )
                 .padding(20.dp)
         ) {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -592,7 +563,7 @@ private fun SurveillanceModeCard(
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .size(56.dp)
+                            .size(54.dp)
                             .clip(RoundedCornerShape(16.dp))
                             .background(accentColor.copy(alpha = 0.2f))
                             .border(1.dp, accentGlow.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
@@ -601,7 +572,7 @@ private fun SurveillanceModeCard(
                             imageVector = icon,
                             contentDescription = title,
                             tint = accentGlow,
-                            modifier = Modifier.size(30.dp)
+                            modifier = Modifier.size(28.dp)
                         )
                     }
 
@@ -681,6 +652,62 @@ private fun SurveillanceModeCard(
             }
         }
     }
+}
+
+@Composable
+private fun RenameDeviceDialog(
+    currentName: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var nameText by remember { mutableStateOf(currentName) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SlateDark900,
+        title = {
+            Text(
+                text = "Rename This Device",
+                color = SlateTextPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "This name is shown in the Online Devices list on other phones (e.g. Front Door, Living Room, Baby Cam).",
+                    color = SlateTextSecondary,
+                    fontSize = 13.sp
+                )
+                OutlinedTextField(
+                    value = nameText,
+                    onValueChange = { nameText = it.take(26) },
+                    singleLine = true,
+                    placeholder = { Text("Living Room Cam", color = SlateTextMuted) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyanGlow,
+                        unfocusedBorderColor = SlateDark700,
+                        focusedTextColor = SlateTextPrimary,
+                        unfocusedTextColor = SlateTextPrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(nameText) },
+                colors = ButtonDefaults.buttonColors(containerColor = CyanAccent)
+            ) {
+                Text("Save", color = SlateDark950, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = SlateTextSecondary)
+            }
+        }
+    )
 }
 
 @Composable

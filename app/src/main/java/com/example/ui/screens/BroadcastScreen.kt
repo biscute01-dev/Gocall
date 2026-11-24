@@ -1,13 +1,11 @@
 package com.example.ui.screens
 
-import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,7 +23,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -33,6 +30,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
@@ -53,13 +51,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.components.CallActionButton
@@ -90,11 +86,8 @@ fun BroadcastScreen(
     viewModel: CallViewModel,
     onStopBroadcast: () -> Unit
 ) {
-    val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
-
     val callState by viewModel.callState.collectAsState()
-    val channelId by viewModel.currentRoomId.collectAsState()
+    val deviceName by viewModel.deviceName.collectAsState()
     val durationSeconds by viewModel.callDurationSeconds.collectAsState()
     val localVideoTrack by viewModel.localVideoTrack.collectAsState()
     val isCameraEnabled by viewModel.isCameraEnabled.collectAsState()
@@ -155,7 +148,7 @@ fun BroadcastScreen(
                     )
 
                     Text(
-                        text = "Camera & mic are turned off to save battery.\nListening on '${channelId ?: ""}' — the Viewer can remotely start broadcast anytime.",
+                        text = "Camera & mic are turned off to save battery.\nListening as '$deviceName' — any viewer can remotely start broadcast anytime.",
                         color = SlateTextSecondary,
                         fontSize = 13.sp,
                         lineHeight = 19.sp,
@@ -286,32 +279,27 @@ fun BroadcastScreen(
                     shape = RoundedCornerShape(10.dp),
                     color = GlassDarkControls,
                     border = BorderStroke(1.dp, GlassDarkBorder),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable {
-                            val code = channelId ?: CallViewModel.DEFAULT_CHANNEL_ID
-                            clipboardManager.setText(AnnotatedString(code))
-                            Toast.makeText(context, "Channel '$code' copied", Toast.LENGTH_SHORT).show()
-                        }
-                        .testTag("broadcast_channel_chip")
+                    modifier = Modifier.testTag("broadcast_device_chip")
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Smartphone,
+                            contentDescription = null,
+                            tint = CyanGlow,
+                            modifier = Modifier.size(14.dp)
+                        )
                         Text(
-                            text = "CH: ${channelId ?: "--"}",
+                            text = deviceName,
                             color = CyanGlow,
                             fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy Channel",
-                            tint = SlateTextSecondary,
-                            modifier = Modifier.size(13.dp)
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 170.dp)
                         )
                         if (!isStandby) {
                             Text(
@@ -408,7 +396,7 @@ fun BroadcastScreen(
                     .padding(bottom = 114.dp, start = 20.dp, end = 20.dp)
             ) {
                 Text(
-                    text = "Ready • Open CamGuard on viewer phone & tap View on '${channelId ?: ""}' (Remote Control Enabled)",
+                    text = "Ready • Open CamGuard on viewer phone & tap '$deviceName' in Online Devices (Remote Control Enabled)",
                     color = SlateTextPrimary,
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
